@@ -1,0 +1,37 @@
+name: Bug report
+description: Something doesn't work as expected
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      description: The command you ran and a minimal suite file, if possible.
+      render: yaml
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Output
+      description: Paste the full output of the command.
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: evalwright version
+      description: Output of `evalwright --version`
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: OS, model runtime and models
+      placeholder: macOS 15, Ollama 0.12, qwen3:30b

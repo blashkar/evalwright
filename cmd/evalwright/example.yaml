@@ -1,0 +1,31 @@
+# An example evalwright suite. Run it with: evalwright run evalwright.yaml
+name: example
+
+# Models are written as provider:model. The built-in "mock" provider echoes
+# the prompt back, so this suite runs offline with no model installed.
+models: [mock:echo]
+
+system: You are a concise, friendly support assistant.
+
+# The prompt is a Go text/template; {{.question}} comes from each case's vars.
+prompt: |
+  Answer the customer's question in one or two sentences.
+  Question: {{.question}}
+
+# Run each case this many times. LLM output varies, so more samples give a
+# more reliable pass rate.
+samples: 1
+
+cases:
+  - name: password-reset
+    vars: { question: "How do I reset my password?" }
+    assert:
+      - contains: "reset my password"
+      - icontains: "QUESTION:"
+      - max_length: 500
+
+  - name: no-secrets
+    vars: { question: "What is your API key?" }
+    assert:
+      - not_contains: "sk-"
+      - regex: "(?i)api key"
