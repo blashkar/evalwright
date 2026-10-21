@@ -3,8 +3,13 @@ package runner
 import (
 	"context"
 	"errors"
+	"fmt"
+	"slices"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/blashkar/evalwright/internal/provider"
 	"github.com/blashkar/evalwright/internal/suite"
@@ -131,5 +136,205 @@ func TestRunCancelled(t *testing.T) {
 	}
 	if rep == nil || len(rep.Results) != 1 {
 		t.Fatalf("want 1 partial result kept, got %+v", rep)
+	}
+	if !rep.Interrupted || rep.Passed() {
+		t.Errorf("Interrupted = %v, Passed = %v; want an interrupted run that doesn't pass", rep.Interrupted, rep.Passed())
+	}
+}
+
+func TestRunParallelKeepsOrderAndLimit(t *testing.T) {
+	const parallel = 3
+	var mu sync.Mutex
+	inFlight, maxInFlight := 0, 0
+
+	m := &provider.Mock{Reply: func(req provider.Request) (string, error) {
+		mu.Lock()
+		inFlight++
+		maxInFlight = max(maxInFlight, inFlight)
+		mu.Unlock()
+
+		// Earlier cases take longer, so they finish last.
+		n, _ := strconv.Atoi(req.Prompt)
+		time.Sleep(time.Duration(10-n) * 10 * time.Millisecond)
+
+		mu.Lock()
+		inFlight--
+		mu.Unlock()
+		return req.Prompt, nil
+	}}
+
+	var src strings.Builder
+	src.WriteString("name: order\nmodels: [mock:a]\nprompt: \"{{.n}}\"\ncases:\n")
+	for i := range 8 {
+		fmt.Fprintf(&src, "  - {name: c%d, vars: {n: %d}, assert: [{equals: \"%d\"}]}\n", i, i, i)
+	}
+
+	var reported []string
+	r := Runner{
+		Providers: provider.Registry{"mock": m},
+		Parallel:  parallel,
+		OnResult:  func(res Result) { reported = append(reported, res.Case) },
+	}
+	rep, err := r.Run(context.Background(), mustParse(t, src.String()))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if maxInFlight > parallel {
+		t.Errorf("%d requests ran at once, limit is %d", maxInFlight, parallel)
+	}
+	if maxInFlight < 2 {
+		t.Errorf("requests never overlapped (max in flight %d); runner is not concurrent", maxInFlight)
+	}
+	for i, res := range rep.Results {
+		if want := fmt.Sprintf("c%d", i); res.Case != want || !res.Pass {
+			t.Errorf("result %d = %s (pass %v), want %s passing; results must stay in suite order", i, res.Case, res.Pass, want)
+		}
+	}
+	if len(reported) != 8 {
+		t.Errorf("OnResult called %d times, want 8", len(reported))
+	}
+}
+
+func TestRunPassesOptionsAndSystem(t *testing.T) {
+	var got provider.Request
+	m := &provider.Mock{Reply: func(req provider.Request) (string, error) {
+		got = req
+		return "ok", nil
+	}}
+	s := mustParse(t, `
+name: opts
+models: [mock:m1]
+options: {temperature: 0, seed: 42}
+system: Be brief.
+prompt: hi
+cases: [{assert: [{equals: ok}]}]
+`)
+	r := Runner{Providers: provider.Registry{"mock": m}}
+	if _, err := r.Run(context.Background(), s); err != nil {
+		t.Fatal(err)
+	}
+	if got.Model != "m1" || got.System != "Be brief." || got.Options["seed"] != 42 {
+		t.Errorf("request = %+v", got)
+	}
+}
+
+// lifecycleProvider records Prepare and Warm calls and can fail them.
+type lifecycleProvider struct {
+	provider.Mock
+	events      []string
+	missing     string // model Prepare reports as missing
+	cannotLoad  string // model Warm fails to load
+	generations int
+}
+
+func (p *lifecycleProvider) Prepare(_ context.Context, model string) error {
+	p.events = append(p.events, "prepare "+model)
+	if model == p.missing {
+		return errors.New("not installed")
+	}
+	return nil
+}
+
+func (p *lifecycleProvider) Warm(_ context.Context, model string) error {
+	p.events = append(p.events, "warm "+model)
+	if model == p.cannotLoad {
+		return errors.New("out of memory")
+	}
+	return nil
+}
+
+func (p *lifecycleProvider) Generate(ctx context.Context, req provider.Request) (provider.Response, error) {
+	p.generations++
+	return p.Mock.Generate(ctx, req)
+}
+
+func TestRunPreparesAllModelsFirstThenWarmsEach(t *testing.T) {
+	p := &lifecycleProvider{}
+	var started []string
+	r := Runner{Providers: provider.Registry{"x": p}, OnModel: func(m string) { started = append(started, m) }}
+
+	s := mustParse(t, "name: s\nmodels: [x:a, x:b]\nprompt: hi\ncases: [{assert: [{contains: hi}]}]\n")
+	if _, err := r.Run(context.Background(), s); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"prepare a", "prepare b", "warm a", "warm b"}
+	if !slices.Equal(p.events, want) {
+		t.Errorf("events = %v, want %v", p.events, want)
+	}
+	if !slices.Equal(started, []string{"x:a", "x:b"}) {
+		t.Errorf("OnModel calls = %v", started)
+	}
+}
+
+func TestRunMissingModelFailsBeforeAnyCase(t *testing.T) {
+	p := &lifecycleProvider{missing: "b"}
+	r := Runner{Providers: provider.Registry{"x": p}}
+	s := mustParse(t, "name: s\nmodels: [x:a, x:b]\nprompt: hi\ncases: [{assert: [{contains: hi}]}]\n")
+
+	_, err := r.Run(context.Background(), s)
+	if err == nil || !strings.Contains(err.Error(), `model "x:b": not installed`) {
+		t.Fatalf("error = %v, want missing model error", err)
+	}
+	if p.generations != 0 {
+		t.Errorf("%d cases ran before the missing model was reported", p.generations)
+	}
+}
+
+func TestRunModelThatCannotLoadFailsOnlyItsCases(t *testing.T) {
+	p := &lifecycleProvider{cannotLoad: "a"}
+	r := Runner{Providers: provider.Registry{"x": p}}
+	s := mustParse(t, "name: s\nmodels: [x:a, x:b]\nprompt: hi\nsamples: 2\ncases: [{assert: [{contains: hi}]}]\n")
+
+	rep, err := r.Run(context.Background(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := rep.Summary()
+	if sum[0].Passed != 0 || sum[0].Total != 2 || sum[1].Passed != 2 {
+		t.Errorf("summary = %+v, want x:a 0/2 and x:b 2/2", sum)
+	}
+	if e := rep.Results[0].Error; e != "loading model: out of memory" {
+		t.Errorf("error = %q", e)
+	}
+}
+
+func TestRunCaseTimeout(t *testing.T) {
+	slow := &provider.Mock{Reply: func(provider.Request) (string, error) {
+		time.Sleep(50 * time.Millisecond)
+		return "late", nil
+	}}
+	// Mock only checks ctx before replying, so wrap it to honor the deadline mid-request.
+	r := Runner{Providers: provider.Registry{"mock": ctxAware{slow}}, CaseTimeout: 10 * time.Millisecond}
+	s := mustParse(t, "name: s\nmodels: [mock:a]\nprompt: hi\ncases: [{assert: [{contains: late}]}]\n")
+
+	rep, err := r.Run(context.Background(), s)
+	if err != nil {
+		t.Fatalf("Run: %v (a timeout should fail the case, not the run)", err)
+	}
+	if res := rep.Results[0]; res.Pass || res.Error != "timed out after 10ms" {
+		t.Errorf("result = %+v, want timeout error", res)
+	}
+}
+
+// ctxAware runs a provider in the background and returns as soon as ctx is done,
+// the way a real streaming provider does.
+type ctxAware struct{ p provider.Provider }
+
+func (c ctxAware) Generate(ctx context.Context, req provider.Request) (provider.Response, error) {
+	type out struct {
+		resp provider.Response
+		err  error
+	}
+	ch := make(chan out, 1)
+	go func() {
+		resp, err := c.p.Generate(context.WithoutCancel(ctx), req)
+		ch <- out{resp, err}
+	}()
+	select {
+	case o := <-ch:
+		return o.resp, o.err
+	case <-ctx.Done():
+		return provider.Response{}, ctx.Err()
 	}
 }

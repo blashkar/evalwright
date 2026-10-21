@@ -43,8 +43,12 @@ func (r *Report) Summary() []ModelSummary {
 	return out
 }
 
-// Passed reports whether every result passed.
+// Passed reports whether the run finished and every result passed.
+// An interrupted run never passes, even if everything that ran did.
 func (r *Report) Passed() bool {
+	if r.Interrupted {
+		return false
+	}
 	for _, res := range r.Results {
 		if !res.Pass {
 			return false

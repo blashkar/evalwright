@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/blashkar/evalwright/internal/assert"
@@ -36,12 +37,30 @@ type Report struct {
 	Suite    string        `json:"suite"`
 	Started  time.Time     `json:"started"`
 	Duration time.Duration `json:"duration_ns"`
-	Results  []Result      `json:"results"`
+	// Interrupted is set when the run was cancelled before every case ran.
+	Interrupted bool     `json:"interrupted,omitempty"`
+	Results     []Result `json:"results"`
 }
 
 // Runner runs suites using the providers in its registry.
 type Runner struct {
 	Providers provider.Registry
+
+	// Parallel is the maximum number of requests sent to one model at a time.
+	// Values below 1 mean 1. Keep it at or below what the server can actually
+	// run in parallel (OLLAMA_NUM_PARALLEL): extra requests wait in the
+	// server's queue, and that wait would be measured as model latency.
+	Parallel int
+
+	// CaseTimeout limits each model request. Zero means no limit.
+	CaseTimeout time.Duration
+
+	// OnModel, if set, is called when the runner starts on a model.
+	OnModel func(model string)
+
+	// OnResult, if set, is called after each result. Calls never overlap, so
+	// it doesn't need to be safe for concurrent use.
+	OnResult func(Result)
 }
 
 type target struct {
@@ -56,13 +75,20 @@ type preparedCase struct {
 	asserts []assert.Assertion
 }
 
+// job is one request: a case, for one sample.
+type job struct {
+	c      *preparedCase
+	sample int
+}
+
 // Run executes every case against every model in s.
 //
-// All models, prompts and assertions are checked before any model is called,
-// so a typo fails in milliseconds instead of halfway through a long run.
-// If ctx is cancelled, Run returns the results collected so far along with ctx's error.
+// Model names, prompts and assertions are all checked, and every model is
+// prepared (e.g. confirmed to be downloaded), before any case runs, so a typo
+// or missing model fails in seconds instead of halfway through a long run.
+// If ctx is cancelled, Run returns the results finished so far along with ctx's error.
 func (r *Runner) Run(ctx context.Context, s *suite.Suite) (*Report, error) {
-	targets, cases, err := r.prepare(s)
+	targets, cases, err := r.prepare(ctx, s)
 	if err != nil {
 		return nil, err
 	}
@@ -73,21 +99,20 @@ func (r *Runner) Run(ctx context.Context, s *suite.Suite) (*Report, error) {
 	// Models are the outer loop so each local model is loaded into memory once,
 	// rather than being swapped in and out for every case.
 	for _, t := range targets {
-		for _, c := range cases {
-			for sample := range s.Samples {
-				res := runOne(ctx, t, s.System, c, sample+1)
-				if ctx.Err() != nil {
-					// The last result was cut short by cancellation; it says nothing about the model.
-					return rep, ctx.Err()
-				}
-				rep.Results = append(rep.Results, res)
-			}
+		if r.OnModel != nil {
+			r.OnModel(t.spec)
+		}
+		results, err := r.runModel(ctx, t, s, cases)
+		rep.Results = append(rep.Results, results...)
+		if err != nil {
+			rep.Interrupted = true
+			return rep, err
 		}
 	}
 	return rep, nil
 }
 
-func (r *Runner) prepare(s *suite.Suite) ([]target, []preparedCase, error) {
+func (r *Runner) prepare(ctx context.Context, s *suite.Suite) ([]target, []preparedCase, error) {
 	var errs []error
 
 	targets := make([]target, 0, len(s.Models))
@@ -122,17 +147,109 @@ func (r *Runner) prepare(s *suite.Suite) ([]target, []preparedCase, error) {
 	if err := errors.Join(errs...); err != nil {
 		return nil, nil, err
 	}
+
+	// Only contact providers once the suite itself is known to be valid.
+	for _, t := range targets {
+		if p, ok := t.p.(provider.Preparer); ok {
+			if err := p.Prepare(ctx, t.model); err != nil {
+				errs = append(errs, fmt.Errorf("model %q: %w", t.spec, err))
+			}
+		}
+	}
+	if err := errors.Join(errs...); err != nil {
+		return nil, nil, err
+	}
 	return targets, cases, nil
 }
 
-func runOne(ctx context.Context, t target, system string, c preparedCase, sample int) Result {
-	res := Result{Case: c.Name, Model: t.spec, Sample: sample}
+// runModel runs every case and sample against one model, up to r.Parallel at
+// a time, and returns the finished results in suite order.
+func (r *Runner) runModel(ctx context.Context, t target, s *suite.Suite, cases []preparedCase) ([]Result, error) {
+	var jobs []job
+	for i := range cases {
+		for n := range s.Samples {
+			jobs = append(jobs, job{c: &cases[i], sample: n + 1})
+		}
+	}
 
-	resp, err := t.p.Generate(ctx, provider.Request{Model: t.model, System: system, Prompt: c.prompt})
+	if w, ok := t.p.(provider.Warmer); ok {
+		if err := w.Warm(ctx, t.model); err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			// A model that can't load (e.g. not enough memory) fails all of
+			// its cases, but the other models in the suite still run.
+			out := make([]Result, len(jobs))
+			for i, j := range jobs {
+				out[i] = Result{Case: j.c.Name, Model: t.spec, Sample: j.sample, Error: "loading model: " + err.Error()}
+				r.report(out[i])
+			}
+			return out, nil
+		}
+	}
+
+	// Each goroutine writes only its own index, so the slices need no lock,
+	// and results come out in suite order however the requests interleave.
+	results := make([]Result, len(jobs))
+	finished := make([]bool, len(jobs))
+	sem := make(chan struct{}, max(r.Parallel, 1))
+	var wg sync.WaitGroup
+	var reportMu sync.Mutex
+
+	for i, j := range jobs {
+		sem <- struct{}{} // wait for a free slot
+		if ctx.Err() != nil {
+			<-sem
+			break
+		}
+		wg.Go(func() {
+			defer func() { <-sem }()
+			res := r.runOne(ctx, t, s, j)
+			if ctx.Err() != nil {
+				return // cut short by cancellation; it says nothing about the model
+			}
+			results[i], finished[i] = res, true
+			reportMu.Lock()
+			r.report(res)
+			reportMu.Unlock()
+		})
+	}
+	wg.Wait()
+
+	out := make([]Result, 0, len(jobs))
+	for i, ok := range finished {
+		if ok {
+			out = append(out, results[i])
+		}
+	}
+	return out, ctx.Err()
+}
+
+func (r *Runner) report(res Result) {
+	if r.OnResult != nil {
+		r.OnResult(res)
+	}
+}
+
+func (r *Runner) runOne(ctx context.Context, t target, s *suite.Suite, j job) Result {
+	res := Result{Case: j.c.Name, Model: t.spec, Sample: j.sample}
+
+	reqCtx := ctx
+	if r.CaseTimeout > 0 {
+		var cancel context.CancelFunc
+		reqCtx, cancel = context.WithTimeout(ctx, r.CaseTimeout)
+		defer cancel()
+	}
+
+	req := provider.Request{Model: t.model, System: s.System, Prompt: j.c.prompt, Options: s.Options}
+	resp, err := t.p.Generate(reqCtx, req)
 	if err != nil {
-		// A failed request is a failed case, not a fatal error: one flaky
-		// request shouldn't throw away the rest of the run.
+		// A failed request is a failed case, not a fatal error: one slow or
+		// flaky request shouldn't throw away the rest of the run.
 		res.Error = err.Error()
+		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+			res.Error = fmt.Sprintf("timed out after %s", r.CaseTimeout)
+		}
 		return res
 	}
 	res.Output = resp.Text
@@ -140,10 +257,10 @@ func runOne(ctx context.Context, t target, system string, c preparedCase, sample
 
 	out := assert.Output{Text: resp.Text, Latency: resp.Latency}
 	res.Pass = true
-	for _, a := range c.asserts {
-		r := a.Check(ctx, out)
-		res.Checks = append(res.Checks, CheckResult{Assertion: a.Name(), Pass: r.Pass, Detail: r.Detail})
-		res.Pass = res.Pass && r.Pass
+	for _, a := range j.c.asserts {
+		cr := a.Check(ctx, out)
+		res.Checks = append(res.Checks, CheckResult{Assertion: a.Name(), Pass: cr.Pass, Detail: cr.Detail})
+		res.Pass = res.Pass && cr.Pass
 	}
 	return res
 }

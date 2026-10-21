@@ -15,13 +15,15 @@ import (
 
 // Suite is a set of test cases that are run against one or more models.
 type Suite struct {
-	Name       string   `yaml:"name"`
-	Models     []string `yaml:"models"`
-	System     string   `yaml:"system"`
-	Prompt     string   `yaml:"prompt"`
-	PromptFile string   `yaml:"prompt_file"`
-	Samples    int      `yaml:"samples"`
-	Cases      []Case   `yaml:"cases"`
+	Name   string   `yaml:"name"`
+	Models []string `yaml:"models"`
+	// Options are passed to every model, e.g. {temperature: 0, seed: 42}.
+	Options    map[string]any `yaml:"options"`
+	System     string         `yaml:"system"`
+	Prompt     string         `yaml:"prompt"`
+	PromptFile string         `yaml:"prompt_file"`
+	Samples    int            `yaml:"samples"`
+	Cases      []Case         `yaml:"cases"`
 
 	tmpl *template.Template
 }

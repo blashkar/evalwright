@@ -1,5 +1,6 @@
-# An example evalwright suite. Run it with: evalwright run evalwright.yaml
-name: example
+# An offline example: runs without any model installed.
+# Run it with: evalwright run examples/offline.yaml
+name: offline
 
 # Models are written as provider:model. The built-in "mock" provider echoes
 # the prompt back, so this suite runs offline with no model installed.

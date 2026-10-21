@@ -71,3 +71,24 @@ func TestExcerptTruncates(t *testing.T) {
 		t.Errorf("excerpt has %d runes, want %d", len([]rune(got)), want)
 	}
 }
+
+func TestTableInterrupted(t *testing.T) {
+	tests := []struct {
+		name string
+		rep  *runner.Report
+	}{
+		{"before any result", &runner.Report{Suite: "demo", Interrupted: true}},
+		{"after some passed", &runner.Report{Suite: "demo", Interrupted: true, Results: []runner.Result{{Case: "a", Model: "m", Sample: 1, Pass: true}}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			if err := Table(&buf, tt.rep); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(buf.String(), "INTERRUPTED  demo") || strings.Contains(buf.String(), "PASS  demo") {
+				t.Errorf("an interrupted run must say INTERRUPTED, never PASS:\n%s", buf.String())
+			}
+		})
+	}
+}

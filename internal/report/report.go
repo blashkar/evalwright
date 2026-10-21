@@ -20,6 +20,12 @@ const maxOutputExcerpt = 200
 func Table(w io.Writer, rep *runner.Report) error {
 	fmt.Fprintf(w, "Suite: %s\n\n", rep.Suite)
 
+	if len(rep.Results) == 0 {
+		fmt.Fprintln(w, "No results.")
+		_, err := fmt.Fprintf(w, "\n%s  %s in %s\n", verdict(rep), rep.Suite, rep.Duration.Round(time.Millisecond))
+		return err
+	}
+
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "CASE\tMODEL\tSAMPLE\tRESULT\tLATENCY")
 	for _, r := range rep.Results {
@@ -41,12 +47,19 @@ func Table(w io.Writer, rep *runner.Report) error {
 		return err
 	}
 
-	verdict := "PASS"
-	if !rep.Passed() {
-		verdict = "FAIL"
-	}
-	_, err := fmt.Fprintf(w, "\n%s  %s in %s\n", verdict, rep.Suite, rep.Duration.Round(time.Millisecond))
+	_, err := fmt.Fprintf(w, "\n%s  %s in %s\n", verdict(rep), rep.Suite, rep.Duration.Round(time.Millisecond))
 	return err
+}
+
+func verdict(rep *runner.Report) string {
+	switch {
+	case rep.Interrupted:
+		return "INTERRUPTED"
+	case rep.Passed():
+		return "PASS"
+	default:
+		return "FAIL"
+	}
 }
 
 func writeFailures(w io.Writer, rep *runner.Report) {

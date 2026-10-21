@@ -12,9 +12,10 @@ import (
 
 // Exit codes, so CI scripts can tell "tests failed" apart from "evalwright is misconfigured".
 const (
-	exitOK     = 0
-	exitFailed = 1
-	exitError  = 2
+	exitOK          = 0
+	exitFailed      = 1
+	exitError       = 2
+	exitInterrupted = 130 // the shell convention for "stopped by Ctrl-C" (128 + SIGINT)
 )
 
 // errSuiteFailed means the run completed but at least one case failed.
@@ -36,6 +37,9 @@ func run() int {
 		return exitOK
 	case errors.Is(err, errSuiteFailed):
 		return exitFailed
+	case errors.Is(err, context.Canceled):
+		fmt.Fprintln(os.Stderr, "evalwright: interrupted")
+		return exitInterrupted
 	default:
 		fmt.Fprintln(os.Stderr, "evalwright:", err)
 		return exitError
