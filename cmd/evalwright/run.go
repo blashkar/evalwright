@@ -41,7 +41,7 @@ func newRunCmd() *cobra.Command {
 	f := cmd.Flags()
 	f.StringVarP(&opts.outPath, "output", "o", "", "also write results as JSON to this file")
 	f.IntVarP(&opts.parallel, "parallel", "p", 1, "requests to run at once per model; match OLLAMA_NUM_PARALLEL")
-	f.DurationVar(&opts.timeout, "timeout", 5*time.Minute, "time limit for each model request (0 for none)")
+	f.DurationVar(&opts.timeout, "timeout", 5*time.Minute, "time limit for each model request and model load (0 for none)")
 	f.BoolVar(&opts.pull, "pull", false, "download models that aren't installed")
 	f.BoolVarP(&opts.quiet, "quiet", "q", false, "don't print progress while running")
 	return cmd
@@ -78,21 +78,39 @@ func runSuites(ctx context.Context, out, errOut io.Writer, paths []string, opts 
 		},
 	}
 
-	var reports []*runner.Report
-	failed := false
-	for i, path := range paths {
+	// Load and check every suite before running any, so a mistake in the
+	// last suite is reported in seconds rather than after the others have run.
+	suites := make([]*suite.Suite, 0, len(paths))
+	var loadErrs []error
+	for _, path := range paths {
 		s, err := suite.Load(path)
 		if err != nil {
-			return err
+			loadErrs = append(loadErrs, err)
+			continue
 		}
+		if err := r.Check(s); err != nil {
+			loadErrs = append(loadErrs, fmt.Errorf("%s: %w", path, err))
+			continue
+		}
+		suites = append(suites, s)
 		// Warnings point at likely mistakes, so they are shown even with --quiet.
 		for _, w := range s.Warnings() {
 			fmt.Fprintf(errOut, "warning: %s: %s\n", path, w)
 		}
+	}
+	if err := errors.Join(loadErrs...); err != nil {
+		return err
+	}
+
+	var reports []*runner.Report
+	failed := false
+	var runErr error
+	for i, s := range suites {
 		if i > 0 {
 			fmt.Fprintln(out)
 		}
-		rep, runErr := r.Run(ctx, s)
+		var rep *runner.Report
+		rep, runErr = r.Run(ctx, s)
 		if rep != nil {
 			// Print partial results even if the run was interrupted.
 			fmt.Fprintln(progress)
@@ -103,14 +121,18 @@ func runSuites(ctx context.Context, out, errOut io.Writer, paths []string, opts 
 			failed = failed || !rep.Passed()
 		}
 		if runErr != nil {
-			return runErr
+			break
 		}
 	}
 
-	if opts.outPath != "" {
+	// Save results even after Ctrl-C: a partial run can take a long time to repeat.
+	if opts.outPath != "" && len(reports) > 0 {
 		if err := writeJSON(opts.outPath, reports); err != nil {
-			return err
+			return errors.Join(runErr, err)
 		}
+	}
+	if runErr != nil {
+		return runErr
 	}
 	if failed {
 		return errSuiteFailed

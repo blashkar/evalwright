@@ -49,6 +49,12 @@ func TestTable(t *testing.T) {
 			t.Errorf("table output missing %q\n--- output ---\n%s", want, got)
 		}
 	}
+	// A request that got no answer has no latency, not a latency of 0s.
+	for line := range strings.Lines(got) {
+		if f := strings.Fields(line); len(f) == 5 && f[0] == "down" && f[4] != "-" {
+			t.Errorf("error row latency = %q, want -", f[4])
+		}
+	}
 }
 
 func TestJSONRoundTrip(t *testing.T) {

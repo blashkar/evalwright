@@ -124,7 +124,8 @@ func TestRunCancelled(t *testing.T) {
 	m := &provider.Mock{Reply: func(provider.Request) (string, error) {
 		calls++
 		if calls == 2 {
-			cancel() // simulate Ctrl-C during the second request
+			cancel() // simulate Ctrl-C cutting the second request short
+			return "", context.Canceled
 		}
 		return "Paris", nil
 	}}
@@ -134,11 +135,36 @@ func TestRunCancelled(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run error = %v, want context.Canceled", err)
 	}
-	if rep == nil || len(rep.Results) != 1 {
-		t.Fatalf("want 1 partial result kept, got %+v", rep)
+	// The cut-short request says nothing about the model, so it is dropped.
+	if rep == nil || len(rep.Results) != 1 || rep.Results[0].Error != "" {
+		t.Fatalf("want only the 1 finished result, got %+v", rep)
 	}
 	if !rep.Interrupted || rep.Passed() {
 		t.Errorf("Interrupted = %v, Passed = %v; want an interrupted run that doesn't pass", rep.Interrupted, rep.Passed())
+	}
+}
+
+func TestRunCancelledKeepsAnswerThatFinished(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	calls := 0
+	m := &provider.Mock{Reply: func(provider.Request) (string, error) {
+		calls++
+		if calls == 2 {
+			cancel() // Ctrl-C arrives, but this answer is already complete
+		}
+		return "Paris", nil
+	}}
+	r := Runner{Providers: provider.Registry{"mock": m}}
+
+	rep, err := r.Run(ctx, mustParse(t, twoModelSuite))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run error = %v, want context.Canceled", err)
+	}
+	if rep == nil || len(rep.Results) != 2 || !rep.Results[1].Pass {
+		t.Fatalf("want both finished answers kept, got %+v", rep)
+	}
+	if !rep.Interrupted {
+		t.Error("Interrupted = false, want true")
 	}
 }
 
@@ -225,6 +251,8 @@ type lifecycleProvider struct {
 	events      []string
 	missing     string // model Prepare reports as missing
 	cannotLoad  string // model Warm fails to load
+	slowLoad    bool   // Warm blocks until ctx is done
+	warmOptions map[string]any
 	generations int
 }
 
@@ -236,10 +264,15 @@ func (p *lifecycleProvider) Prepare(_ context.Context, model string) error {
 	return nil
 }
 
-func (p *lifecycleProvider) Warm(_ context.Context, model string) error {
+func (p *lifecycleProvider) Warm(ctx context.Context, model string, options map[string]any) error {
 	p.events = append(p.events, "warm "+model)
+	p.warmOptions = options
 	if model == p.cannotLoad {
 		return errors.New("out of memory")
+	}
+	if p.slowLoad {
+		<-ctx.Done()
+		return ctx.Err()
 	}
 	return nil
 }
@@ -296,6 +329,35 @@ func TestRunModelThatCannotLoadFailsOnlyItsCases(t *testing.T) {
 	}
 	if e := rep.Results[0].Error; e != "loading model: out of memory" {
 		t.Errorf("error = %q", e)
+	}
+}
+
+func TestRunWarmsWithSuiteOptions(t *testing.T) {
+	p := &lifecycleProvider{}
+	r := Runner{Providers: provider.Registry{"x": p}}
+	s := mustParse(t, "name: s\nmodels: [x:a]\noptions: {num_ctx: 8192}\nprompt: hi\ncases: [{assert: [{contains: hi}]}]\n")
+	if _, err := r.Run(context.Background(), s); err != nil {
+		t.Fatal(err)
+	}
+	if p.warmOptions["num_ctx"] != 8192 {
+		t.Errorf("Warm options = %v, want the suite's num_ctx", p.warmOptions)
+	}
+}
+
+func TestRunLoadTimeoutFailsOnlyThatModel(t *testing.T) {
+	p := &lifecycleProvider{slowLoad: true}
+	r := Runner{Providers: provider.Registry{"x": p}, CaseTimeout: 10 * time.Millisecond}
+	s := mustParse(t, "name: s\nmodels: [x:a]\nprompt: hi\ncases: [{assert: [{contains: hi}]}]\n")
+
+	rep, err := r.Run(context.Background(), s)
+	if err != nil {
+		t.Fatalf("Run: %v (a load timeout should fail the model's cases, not the run)", err)
+	}
+	if e := rep.Results[0].Error; e != "loading model: timed out after 10ms" {
+		t.Errorf("error = %q", e)
+	}
+	if p.generations != 0 {
+		t.Errorf("%d cases were sent to a model that never loaded", p.generations)
 	}
 }
 

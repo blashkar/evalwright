@@ -56,7 +56,8 @@ type Runner struct {
 	// server's queue, and that wait would be measured as model latency.
 	Parallel int
 
-	// CaseTimeout limits each model request. Zero means no limit.
+	// CaseTimeout limits each model request, and loading each model.
+	// Zero means no limit.
 	CaseTimeout time.Duration
 
 	// OnModel, if set, is called when the runner starts on a model.
@@ -116,7 +117,38 @@ func (r *Runner) Run(ctx context.Context, s *suite.Suite) (*Report, error) {
 	return rep, nil
 }
 
+// Check reports the problems in s that can be found without contacting a
+// model: unknown providers, prompts that don't render and invalid
+// assertions. Run does the same checks, but calling Check on every suite
+// first finds a mistake in the last suite before the others run.
+func (r *Runner) Check(s *suite.Suite) error {
+	_, _, err := r.compile(s)
+	return err
+}
+
 func (r *Runner) prepare(ctx context.Context, s *suite.Suite) ([]target, []preparedCase, error) {
+	targets, cases, err := r.compile(s)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Only contact providers once the suite itself is known to be valid.
+	var errs []error
+	for _, t := range targets {
+		if p, ok := t.p.(provider.Preparer); ok {
+			if err := p.Prepare(ctx, t.model); err != nil {
+				errs = append(errs, fmt.Errorf("model %q: %w", t.spec, err))
+			}
+		}
+	}
+	if err := errors.Join(errs...); err != nil {
+		return nil, nil, err
+	}
+	return targets, cases, nil
+}
+
+// compile resolves s's models and builds its prompts and assertions.
+func (r *Runner) compile(s *suite.Suite) ([]target, []preparedCase, error) {
 	var errs []error
 
 	targets := make([]target, 0, len(s.Models))
@@ -151,18 +183,6 @@ func (r *Runner) prepare(ctx context.Context, s *suite.Suite) ([]target, []prepa
 	if err := errors.Join(errs...); err != nil {
 		return nil, nil, err
 	}
-
-	// Only contact providers once the suite itself is known to be valid.
-	for _, t := range targets {
-		if p, ok := t.p.(provider.Preparer); ok {
-			if err := p.Prepare(ctx, t.model); err != nil {
-				errs = append(errs, fmt.Errorf("model %q: %w", t.spec, err))
-			}
-		}
-	}
-	if err := errors.Join(errs...); err != nil {
-		return nil, nil, err
-	}
 	return targets, cases, nil
 }
 
@@ -176,20 +196,18 @@ func (r *Runner) runModel(ctx context.Context, t target, s *suite.Suite, cases [
 		}
 	}
 
-	if w, ok := t.p.(provider.Warmer); ok {
-		if err := w.Warm(ctx, t.model); err != nil {
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
-			}
-			// A model that can't load (e.g. not enough memory) fails all of
-			// its cases, but the other models in the suite still run.
-			out := make([]Result, len(jobs))
-			for i, j := range jobs {
-				out[i] = Result{Case: j.c.Name, Model: t.spec, Sample: j.sample, Error: "loading model: " + err.Error()}
-				r.report(out[i])
-			}
-			return out, nil
+	if err := r.warm(ctx, t, s); err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
 		}
+		// A model that can't load (e.g. not enough memory) fails all of
+		// its cases, but the other models in the suite still run.
+		out := make([]Result, len(jobs))
+		for i, j := range jobs {
+			out[i] = Result{Case: j.c.Name, Model: t.spec, Sample: j.sample, Error: "loading model: " + err.Error()}
+			r.report(out[i])
+		}
+		return out, nil
 	}
 
 	// Each goroutine writes only its own index, so the slices need no lock,
@@ -209,8 +227,10 @@ func (r *Runner) runModel(ctx context.Context, t target, s *suite.Suite, cases [
 		wg.Go(func() {
 			defer func() { <-sem }()
 			res := r.runOne(ctx, t, s, j)
-			if ctx.Err() != nil {
-				return // cut short by cancellation; it says nothing about the model
+			if res.Error != "" && ctx.Err() != nil {
+				// Probably cut short by cancellation, which says nothing about
+				// the model. An answer that finished before it is still kept.
+				return
 			}
 			results[i], finished[i] = res, true
 			reportMu.Lock()
@@ -227,6 +247,26 @@ func (r *Runner) runModel(ctx context.Context, t target, s *suite.Suite, cases [
 		}
 	}
 	return out, ctx.Err()
+}
+
+// warm loads t's model, if its provider supports that, so the load time
+// isn't counted as the first case's latency. It has the same time limit as
+// a request, so a model that never finishes loading can't hang the run.
+func (r *Runner) warm(ctx context.Context, t target, s *suite.Suite) error {
+	w, ok := t.p.(provider.Warmer)
+	if !ok {
+		return nil
+	}
+	if r.CaseTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, r.CaseTimeout)
+		defer cancel()
+	}
+	err := w.Warm(ctx, t.model, s.Options)
+	if r.CaseTimeout > 0 && errors.Is(err, context.DeadlineExceeded) && ctx.Err() != nil {
+		return fmt.Errorf("timed out after %s", r.CaseTimeout)
+	}
+	return err
 }
 
 func (r *Runner) report(res Result) {

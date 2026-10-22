@@ -42,9 +42,10 @@ type Preparer interface {
 
 // Warmer is implemented by providers that can load a model ahead of time.
 // The runner warms each model just before its cases run, so the time to
-// load it isn't counted as the first case's latency.
+// load it isn't counted as the first case's latency. options are the
+// suite's options, since some of them can change how a model is loaded.
 type Warmer interface {
-	Warm(ctx context.Context, model string) error
+	Warm(ctx context.Context, model string, options map[string]any) error
 }
 
 // Registry maps a provider name to its implementation. Suites refer to models

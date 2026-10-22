@@ -20,7 +20,7 @@ type fakeOllama struct {
 	mu        sync.Mutex
 	installed map[string]bool
 	chats     []map[string]any
-	loads     []string
+	loads     []map[string]any // bodies of load requests
 }
 
 func (f *fakeOllama) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -46,7 +46,7 @@ func (f *fakeOllama) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.installed[model] = true
 	case "/api/chat":
 		if msgs, _ := body["messages"].([]any); len(msgs) == 0 {
-			f.loads = append(f.loads, model)
+			f.loads = append(f.loads, body)
 			fmt.Fprint(w, `{"done":true,"done_reason":"load"}`)
 			return
 		}
@@ -72,7 +72,7 @@ func (f *fakeOllama) isInstalled(model string) bool {
 	return f.installed[model]
 }
 
-func (f *fakeOllama) loaded() []string {
+func (f *fakeOllama) loaded() []map[string]any {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.loads
@@ -166,11 +166,18 @@ func TestOllamaPrepare(t *testing.T) {
 
 func TestOllamaWarm(t *testing.T) {
 	fake, client := newFakeOllama(t, "m")
-	if err := (&Ollama{Client: client}).Warm(context.Background(), "m"); err != nil {
+	// num_ctx changes how a model is loaded, so the load must use the
+	// suite's options or Ollama would reload the model on the first case.
+	opts := map[string]any{"num_ctx": 8192}
+	if err := (&Ollama{Client: client}).Warm(context.Background(), "m", opts); err != nil {
 		t.Fatalf("Warm: %v", err)
 	}
-	if loads := fake.loaded(); len(loads) != 1 || loads[0] != "m" {
-		t.Errorf("loads = %v, want [m]", loads)
+	loads := fake.loaded()
+	if len(loads) != 1 || loads[0]["model"] != "m" {
+		t.Fatalf("loads = %v, want one load of m", loads)
+	}
+	if got, _ := loads[0]["options"].(map[string]any); got["num_ctx"] != float64(8192) {
+		t.Errorf("load options = %v, want num_ctx 8192", loads[0]["options"])
 	}
 }
 

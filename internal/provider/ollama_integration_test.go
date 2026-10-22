@@ -34,7 +34,7 @@ func TestOllamaIntegration(t *testing.T) {
 	if err := o.Prepare(ctx, model); err != nil {
 		t.Fatalf("Prepare: %v", err)
 	}
-	if err := o.Warm(ctx, model); err != nil {
+	if err := o.Warm(ctx, model, nil); err != nil {
 		t.Fatalf("Warm: %v", err)
 	}
 

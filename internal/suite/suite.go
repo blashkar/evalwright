@@ -132,6 +132,11 @@ func (s *Suite) validate() error {
 	if len(s.Models) == 0 {
 		errs = append(errs, errors.New("at least one model is required"))
 	}
+	// Results are grouped by model and by case name, so a repeated name
+	// would silently merge two sets of results into one.
+	for _, m := range duplicates(s.Models) {
+		errs = append(errs, fmt.Errorf("model %q is listed more than once", m))
+	}
 	switch {
 	case s.Prompt == "" && s.PromptFile == "":
 		errs = append(errs, errors.New("one of prompt or prompt_file is required"))
@@ -144,14 +149,19 @@ func (s *Suite) validate() error {
 	if len(s.Cases) == 0 {
 		errs = append(errs, errors.New("at least one case is required"))
 	}
-	for _, c := range s.Cases {
+	names := make([]string, len(s.Cases))
+	for i, c := range s.Cases {
+		names[i] = c.Name
 		if len(c.Assert) == 0 {
 			errs = append(errs, fmt.Errorf("case %q: at least one assertion is required", c.Name))
 		}
 	}
+	for _, n := range duplicates(names) {
+		errs = append(errs, fmt.Errorf("case name %q is used more than once (unnamed cases are named case-1, case-2, ...)", n))
+	}
 	if v, ok := s.Options["seed"]; ok {
-		if _, ok := wholeNumber(v); !ok {
-			errs = append(errs, fmt.Errorf("options.seed must be a whole number, got %v", v))
+		if err := checkSeed(v, s.Samples); err != nil {
+			errs = append(errs, err)
 		}
 	}
 	if v, ok := s.Options["temperature"]; ok {
@@ -160,6 +170,40 @@ func (s *Suite) validate() error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// maxSeed is the largest seed a model can use: llama.cpp keeps only the
+// low 32 bits, so larger seeds would repeat smaller ones.
+const maxSeed = math.MaxUint32
+
+// checkSeed checks that every sample's seed (seed to seed+samples-1) is one
+// a model will actually use as given.
+func checkSeed(v any, samples int) error {
+	seed, ok := wholeNumber(v)
+	switch {
+	case !ok:
+		return fmt.Errorf("options.seed must be a whole number, got %v", v)
+	case seed < 0:
+		// Ollama treats -1 as "pick a random seed", so the run couldn't be reproduced.
+		return fmt.Errorf("options.seed must be 0 or more, got %d; to get random answers, leave seed out", seed)
+	case samples > 0 && seed > maxSeed-int64(samples-1):
+		return fmt.Errorf("options.seed is too large: samples would use seeds %d to %d, but models use 32-bit seeds (at most %d)",
+			seed, seed+int64(samples-1), int64(maxSeed))
+	}
+	return nil
+}
+
+// duplicates returns the values that appear more than once in list, once each.
+func duplicates(list []string) []string {
+	seen := map[string]int{}
+	var dups []string
+	for _, v := range list {
+		seen[v]++
+		if seen[v] == 2 {
+			dups = append(dups, v)
+		}
+	}
+	return dups
 }
 
 // SampleSeed returns the seed for sample n (counting from 1), and false if

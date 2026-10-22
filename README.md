@@ -84,13 +84,13 @@ More in [`examples/`](examples). `evalwright models` lists your installed models
 | `ollama` | `ollama:llama3.2:3b` | Talks to `$OLLAMA_HOST` (default `http://127.0.0.1:11434`). Responses are streamed, so Ctrl-C stops generation immediately. |
 | `mock` | `mock:echo` | Returns the prompt unchanged. For trying evalwright offline and for tests. |
 
-Before running anything, evalwright checks that every model is installed. `--pull` downloads missing ones instead of failing. Each model is then loaded once before its cases run, so load time isn't counted as the first case's latency.
+Before running anything, evalwright checks that every model is installed. `--pull` downloads missing ones instead of failing. Each model is then loaded once, with the suite's options, before its cases run, so load time isn't counted as the first case's latency. (Some options, like `num_ctx`, change how a model is loaded; warming up without them would make Ollama load the model again on the first case.)
 
 ### Samples and seeds
 
 LLM output varies, so `samples: N` runs each case N times and reports a pass rate. For that to mean anything, the samples have to be able to differ:
 
-- **Each sample gets its own seed.** If the suite sets `seed: 7`, samples use seeds 7, 8, 9, … . A single fixed seed would make every sample an identical copy, and a 100% pass rate over copies measures nothing. The seed each sample used is saved in the JSON results, so any answer can be reproduced exactly.
+- **Each sample gets its own seed.** If the suite sets `seed: 7`, samples use seeds 7, 8, 9, … . A single fixed seed would make every sample an identical copy, and a 100% pass rate over copies measures nothing. The seed each sample used is saved in the JSON results, so any answer can be reproduced exactly. Seeds must be between 0 and 4294967295: Ollama treats -1 as "random", and models only use 32-bit seeds.
 - **Use a sampling temperature.** At `temperature: 0` the model always picks its most likely token, so every sample is the same; evalwright warns if a suite combines that with `samples` > 1. Even 0.2 gives near-identical answers in practice. 0.7 is a realistic chat setting.
 
 ### Assertions
@@ -112,14 +112,14 @@ LLM output varies, so `samples: N` runs each case N times and reports a pass rat
 | 0 | every case passed |
 | 1 | the run finished and at least one case failed |
 | 2 | evalwright could not run (bad suite file, missing model, Ollama not running, …) |
-| 130 | interrupted with Ctrl-C (results finished so far are still printed) |
+| 130 | interrupted with Ctrl-C (results finished so far are still printed, and saved with `-o`) |
 
 ### `run` flags
 
 | Flag | Default | |
 |---|---|---|
 | `-p, --parallel` | 1 | Requests sent to a model at once. See below before raising it. |
-| `--timeout` | 5m | Time limit per request; a timeout fails that case only. |
+| `--timeout` | 5m | Time limit per request and per model load. A request timeout fails that case only; a load timeout fails that model's cases only. |
 | `--pull` | off | Download models that aren't installed. |
 | `-o, --output` | | Also save full results, including every output, as JSON. |
 | `-q, --quiet` | off | Hide progress lines. Progress goes to stderr, so the report on stdout can be piped either way. |
@@ -143,14 +143,16 @@ LLM output varies, so `samples: N` runs each case N times and reports a pass rat
 
 The overall rates hide what matters. llama3.2 scores higher, but its failures include a **leaked system prompt** and **wrong or missing shipping facts**. Every one of qwen3's failures is the same habit: adding "with all tags attached" to the return policy. That habit is stubborn; adding "There are no other return conditions" to the system prompt didn't change it (80–84% across the same seeds). Which model is better depends on which failure you can live with, so read results per case, not just the total.
 
-Every check in that suite was verified by reading all 150 answers by hand: no correct answer fails and no wrong answer passes. Substring and regex checks only catch the failures you anticipated. LLM-graded assertions (on the roadmap) will cover the rest.
+The checks were verified by reading every answer by hand, 200 of them across seeds 7, 1000, 5000 and 2024: no correct answer fails and no wrong answer passes. The 145 distinct answers, labeled, are a test ([`examples/compare_models_test.go`](examples/compare_models_test.go)) together with 25 hand-written answers aimed at the checks' weak spots: "you can't" must not count as a yes, "you can return them if they're not worn" must not count as a no, and €9.99 is not 9 EUR. A check that gets weaker fails CI.
+
+Substring and regex checks still only catch the failures you anticipated. LLM-graded assertions (on the roadmap) will cover the rest.
 
 ## Design notes
 
-- **Validate everything before calling a model.** Model names, prompt templates and assertions are all checked up front, and every problem is reported at once with line numbers. A typo fails in milliseconds instead of 20 minutes into a run.
+- **Validate everything before calling a model.** Model names, prompt templates, assertions, seeds and duplicate case names are checked up front, for every suite file passed to `run`, and every problem is reported at once with line numbers. A typo in the last suite fails in milliseconds instead of 20 minutes into a run.
 - **A failed request fails the case, not the run.** One timeout shouldn't throw away the results you already have. Failed requests are counted under ERRORS and left out of MEAN LATENCY; otherwise their zero latency would make an unreliable model look fast.
 - **Models are the outer loop.** Local models are slow to load, so each model handles all of its cases before the next model is loaded.
-- **Ctrl-C keeps partial results.** Cancellation goes through `context.Context`, which also aborts in-flight HTTP streams, and evalwright prints whatever finished. An interrupted run is reported as `INTERRUPTED`, never `PASS`.
+- **Ctrl-C keeps partial results.** Cancellation goes through `context.Context`, which also aborts in-flight HTTP streams, and evalwright prints whatever finished and still writes it to `-o`. An interrupted run is reported as `INTERRUPTED`, never `PASS`.
 - **Bounded concurrency, deterministic output.** Each model gets a semaphore-limited set of goroutines. Each goroutine writes its result into its own slot of a preallocated slice, so no lock is needed and results come out in suite order however requests interleave.
 - **A hand-written Ollama client.** About 370 lines over `net/http` with newline-delimited JSON streaming, rather than an SDK, so evalwright controls timeouts, cancellation and error messages ("cannot reach Ollama at …; is it running?").
 - **Pluggable providers and assertions.** Both are small interfaces (`provider.Provider`, `assert.Assertion`), so adding a backend or a check doesn't touch the runner.

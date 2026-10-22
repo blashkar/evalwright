@@ -5,23 +5,33 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/blashkar/evalwright/internal/runner"
 	"github.com/blashkar/evalwright/internal/suite"
 )
 
 // execute runs the CLI with args and returns stdout and stderr.
 func execute(t *testing.T, args ...string) (stdout, stderr string, err error) {
 	t.Helper()
+	return executeContext(context.Background(), t, args...)
+}
+
+func executeContext(ctx context.Context, t *testing.T, args ...string) (stdout, stderr string, err error) {
+	t.Helper()
 	var out, errOut bytes.Buffer
 	cmd := newRootCmd()
 	cmd.SetOut(&out)
 	cmd.SetErr(&errOut)
 	cmd.SetArgs(args)
-	err = cmd.ExecuteContext(context.Background())
+	err = cmd.ExecuteContext(ctx)
 	return out.String(), errOut.String(), err
 }
 
@@ -120,5 +130,73 @@ func TestRunPrintsSuiteWarningsEvenWhenQuiet(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "warning: ") || !strings.Contains(stderr, "every sample gives the same answer") {
 		t.Errorf("stderr missing temperature warning:\n%s", stderr)
+	}
+}
+
+func TestRunChecksEverySuiteBeforeRunningAny(t *testing.T) {
+	bad := writeSuite(t, "name: x\nmodels: [mock:echo]\nprompt: hi\ncases: [{assert: [{contans: hi}]}]\n")
+	resultsPath := filepath.Join(t.TempDir(), "results.json")
+
+	stdout, _, err := execute(t, "run", "../../examples/offline.yaml", bad, "-o", resultsPath)
+	if err == nil || !strings.Contains(err.Error(), bad) {
+		t.Fatalf("error = %v, want one naming %s", err, bad)
+	}
+	if stdout != "" {
+		t.Errorf("a suite ran before the broken one was reported:\n%s", stdout)
+	}
+	if _, err := os.Stat(resultsPath); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("results file written for a run that never started: %v", err)
+	}
+}
+
+func TestRunInterruptedStillWritesResults(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// A fake Ollama that answers the first case, then gets Ctrl-C during the second.
+	var mu sync.Mutex
+	chats := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/show" {
+			fmt.Fprint(w, `{}`)
+			return
+		}
+		var body struct{ Messages []any }
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if len(body.Messages) == 0 { // warm-up
+			fmt.Fprint(w, `{"done":true}`)
+			return
+		}
+		mu.Lock()
+		chats++
+		n := chats
+		mu.Unlock()
+		if n == 1 {
+			fmt.Fprint(w, `{"message":{"role":"assistant","content":"hi"},"done":true}`)
+			return
+		}
+		cancel()
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+	t.Setenv("OLLAMA_HOST", srv.URL)
+
+	path := writeSuite(t, "name: x\nmodels: [ollama:m]\nprompt: hi\ncases: [{assert: [{contains: hi}]}, {assert: [{contains: hi}]}]\n")
+	resultsPath := filepath.Join(t.TempDir(), "results.json")
+	_, _, err := executeContext(ctx, t, "run", path, "-o", resultsPath)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+
+	b, err := os.ReadFile(resultsPath)
+	if err != nil {
+		t.Fatalf("partial results were not saved: %v", err)
+	}
+	var reps []runner.Report
+	if err := json.Unmarshal(b, &reps); err != nil {
+		t.Fatal(err)
+	}
+	if len(reps) != 1 || !reps[0].Interrupted || len(reps[0].Results) != 1 || !reps[0].Results[0].Pass {
+		t.Errorf("saved results = %s, want 1 interrupted report with the 1 finished case", b)
 	}
 }

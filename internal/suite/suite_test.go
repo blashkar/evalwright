@@ -89,6 +89,21 @@ func TestParseErrors(t *testing.T) {
 			"exactly one key",
 		},
 		{
+			"duplicate case names",
+			"name: x\nmodels: [m:a]\nprompt: a\ncases: [{name: c, assert: [{contains: a}]}, {name: c, assert: [{contains: a}]}]\n",
+			`case name "c" is used more than once`,
+		},
+		{
+			"case name clashes with a default name",
+			"name: x\nmodels: [m:a]\nprompt: a\ncases: [{name: case-2, assert: [{contains: a}]}, {assert: [{contains: a}]}]\n",
+			`case name "case-2" is used more than once`,
+		},
+		{
+			"duplicate models",
+			"name: x\nmodels: [m:a, m:b, m:a]\nprompt: a\ncases: [{assert: [{contains: a}]}]\n",
+			`model "m:a" is listed more than once`,
+		},
+		{
 			"bad template",
 			"name: x\nmodels: [m:a]\nprompt: \"{{.oops\"\ncases: [{assert: [{contains: a}]}]\n",
 			"parsing prompt template",
@@ -151,7 +166,7 @@ func TestSampleSeed(t *testing.T) {
 		{"no seed", "{temperature: 0.7}", nil},
 		{"int seed", "{seed: 7}", []int64{7, 8, 9}},
 		{"zero seed", "{seed: 0}", []int64{0, 1, 2}},
-		{"negative seed", "{seed: -2}", []int64{-2, -1, 0}},
+		{"largest seeds", "{seed: 4294967293}", []int64{4294967293, 4294967294, 4294967295}},
 		{"whole float seed", "{seed: 42.0}", []int64{42, 43, 44}},
 	}
 	for _, tt := range tests {
@@ -184,10 +199,14 @@ func TestOptionsValidation(t *testing.T) {
 		{"{seed: 4.5}", "options.seed must be a whole number, got 4.5"},
 		{`{seed: "abc"}`, "options.seed must be a whole number"},
 		{`{temperature: hot}`, "options.temperature must be a number"},
+		// -1 means "random seed" to Ollama, so the run couldn't be reproduced.
+		{"{seed: -1}", "options.seed must be 0 or more, got -1"},
+		// Models use 32-bit seeds; larger ones would repeat smaller ones.
+		{"{seed: 4294967294}", "samples would use seeds 4294967294 to 4294967296"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.options, func(t *testing.T) {
-			src := "name: x\nmodels: [m:a]\nprompt: p\noptions: " + tt.options + "\ncases: [{assert: [{contains: a}]}]\n"
+			src := "name: x\nmodels: [m:a]\nprompt: p\nsamples: 3\noptions: " + tt.options + "\ncases: [{assert: [{contains: a}]}]\n"
 			_, err := Parse(strings.NewReader(src), "test.yaml")
 			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 				t.Errorf("error = %v, want it to contain %q", err, tt.wantErr)

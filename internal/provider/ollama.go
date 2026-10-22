@@ -84,8 +84,8 @@ func (o *Ollama) Prepare(ctx context.Context, model string) error {
 }
 
 // Warm implements Warmer.
-func (o *Ollama) Warm(ctx context.Context, model string) error {
-	return o.Client.Load(ctx, model)
+func (o *Ollama) Warm(ctx context.Context, model string, options map[string]any) error {
+	return o.Client.Load(ctx, model, options)
 }
 
 func (o *Ollama) logf(format string, args ...any) {

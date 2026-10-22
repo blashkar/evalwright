@@ -29,7 +29,7 @@ func Table(w io.Writer, rep *runner.Report) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "CASE\tMODEL\tSAMPLE\tRESULT\tLATENCY")
 	for _, r := range rep.Results {
-		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\n", r.Case, r.Model, r.Sample, status(r), r.Latency.Round(time.Millisecond))
+		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\n", r.Case, r.Model, r.Sample, status(r), latency(r))
 	}
 	if err := tw.Flush(); err != nil {
 		return err
@@ -99,6 +99,15 @@ func status(r runner.Result) string {
 	default:
 		return "FAIL"
 	}
+}
+
+// latency is "-" for a request that got no answer: its zero latency
+// would read as an instant reply.
+func latency(r runner.Result) string {
+	if r.Error != "" {
+		return "-"
+	}
+	return r.Latency.Round(time.Millisecond).String()
 }
 
 func excerpt(s string) string {

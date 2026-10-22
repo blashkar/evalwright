@@ -74,10 +74,12 @@ func (c *Client) Chat(ctx context.Context, req ChatRequest, fn func(ChatResponse
 }
 
 // Load loads model into memory without generating anything, so the next
-// request doesn't pay the load time.
-func (c *Client) Load(ctx context.Context, model string) error {
+// request doesn't pay the load time. Pass the options later requests will
+// use: some, like num_ctx, decide how the model is loaded, and a request
+// with different ones makes Ollama load the model again.
+func (c *Client) Load(ctx context.Context, model string, options map[string]any) error {
 	resp, err := c.do(ctx, http.MethodPost, "/api/chat", chatRequest{
-		ChatRequest: ChatRequest{Model: model, Messages: []Message{}},
+		ChatRequest: ChatRequest{Model: model, Messages: []Message{}, Options: options},
 	})
 	if err != nil {
 		return err
