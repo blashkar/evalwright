@@ -12,6 +12,9 @@ import (
 type Message struct {
 	Role    string `json:"role"` // "system", "user" or "assistant"
 	Content string `json:"content"`
+	// Thinking is a reasoning model's thinking, which Ollama streams
+	// separately from Content.
+	Thinking string `json:"thinking,omitempty"`
 }
 
 // ChatRequest asks a model to continue a conversation.

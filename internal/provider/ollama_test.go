@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/blashkar/evalwright/internal/ollama"
 )
@@ -53,7 +54,7 @@ func (f *fakeOllama) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.chats = append(f.chats, body)
 		fmt.Fprintln(w, `{"message":{"role":"assistant","content":"Par"},"done":false}`)
 		fmt.Fprintln(w, `{"message":{"role":"assistant","content":"is"},"done":false}`)
-		fmt.Fprintln(w, `{"message":{"role":"assistant","content":""},"done":true,"eval_count":2}`)
+		fmt.Fprintln(w, `{"message":{"role":"assistant","content":""},"done":true,"prompt_eval_count":12,"prompt_eval_duration":3000000,"eval_count":2,"eval_duration":40000000}`)
 	default:
 		http.NotFound(w, r)
 	}
@@ -108,6 +109,16 @@ func TestOllamaGenerate(t *testing.T) {
 	}
 	if resp.Text != "Paris" {
 		t.Errorf("Text = %q, want streamed chunks joined into Paris", resp.Text)
+	}
+	m := resp.Metrics
+	if m.PromptTokens != 12 || m.PromptDuration != 3*time.Millisecond || m.OutputTokens != 2 || m.GenerationDuration != 40*time.Millisecond {
+		t.Errorf("Metrics = %+v, want the counts and durations from the final chunk", m)
+	}
+	if m.TimeToFirstToken <= 0 || m.TimeToFirstToken > resp.Latency {
+		t.Errorf("TimeToFirstToken = %s, want it measured and within the latency %s", m.TimeToFirstToken, resp.Latency)
+	}
+	if tps := m.TokensPerSecond(); tps != 50 {
+		t.Errorf("TokensPerSecond = %v, want 2 tokens / 40ms = 50", tps)
 	}
 
 	got := fake.chat(0)
