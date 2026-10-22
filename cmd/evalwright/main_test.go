@@ -122,6 +122,28 @@ func TestRunRejectsBadParallel(t *testing.T) {
 	}
 }
 
+func TestRunModelsOverridesSuite(t *testing.T) {
+	stdout, stderr, err := execute(t, "run", "../../examples/offline.yaml", "--models", "mock:first,mock:second")
+	if err != nil {
+		t.Fatalf("run: %v\n%s", err, stdout)
+	}
+	if strings.Contains(stderr, "mock:echo") || !strings.Contains(stderr, "▶ mock:first") || !strings.Contains(stderr, "▶ mock:second") {
+		t.Errorf("progress shows the wrong models:\n%s", stderr)
+	}
+	if !strings.Contains(stdout, "Compared with mock:first (the first model)") {
+		t.Errorf("the first --models entry should be the reference:\n%s", stdout)
+	}
+}
+
+func TestRunModelsRejectsBadList(t *testing.T) {
+	for _, list := range []string{"mock:a,mock:a", "mock:a,,mock:b"} {
+		_, _, err := execute(t, "run", "../../examples/offline.yaml", "--models", list)
+		if err == nil || !strings.Contains(err.Error(), "--models") {
+			t.Errorf("--models %s: error = %v, want a --models error", list, err)
+		}
+	}
+}
+
 func TestRunPrintsSuiteWarningsEvenWhenQuiet(t *testing.T) {
 	path := writeSuite(t, "name: x\nmodels: [mock:echo]\noptions: {temperature: 0}\nsamples: 3\nprompt: hi\ncases: [{assert: [{contains: hi}]}]\n")
 	_, stderr, err := execute(t, "run", path, "-q")

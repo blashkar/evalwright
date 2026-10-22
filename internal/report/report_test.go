@@ -107,27 +107,62 @@ func TestTableInterrupted(t *testing.T) {
 	}
 }
 
-// twoModels has model a passing 4 of 5 samples and b passing 1 of 5, all on one case.
-func twoModels(aPasses, bPasses int) *runner.Report {
+// twoModels has models a and b answer one case per entry of aPasses and
+// bPasses, 5 samples each, passing the given number of samples.
+func twoModels(aPasses, bPasses []int) *runner.Report {
 	rep := &runner.Report{Suite: "cmp"}
-	for i := range 5 {
-		rep.Results = append(rep.Results,
-			runner.Result{Case: "c", Model: "a", Sample: i + 1, Pass: i < aPasses},
-			runner.Result{Case: "c", Model: "b", Sample: i + 1, Pass: i < bPasses})
+	for _, m := range []struct {
+		name   string
+		passes []int
+	}{{"a", aPasses}, {"b", bPasses}} {
+		for c, n := range m.passes {
+			for i := range 5 {
+				rep.Results = append(rep.Results, runner.Result{
+					Case: fmt.Sprintf("c%d", c+1), Model: m.name, Sample: i + 1, Pass: i < n,
+				})
+			}
+		}
 	}
 	return rep
 }
 
 func TestTablePerCaseAndComparison(t *testing.T) {
 	tests := []struct {
-		name           string
-		aPass, bPass   int
-		wantComparison string
+		name         string
+		aPass, bPass []int
+		want         []string
+		notWant      []string
 	}{
-		// 4/5 vs 1/5 sounds decisive, but with 5 samples each the intervals
-		// (38–96% and 4–62%) overlap.
-		{"too few samples to tell apart", 4, 1, "The 95% intervals of a and b overlap"},
-		{"clearly different", 5, 0, "a passes more often than b, beyond the 95% intervals."},
+		{
+			// The real llama3.2 vs qwen3 run: equal totals, opposite strengths.
+			name:  "no difference",
+			aPass: []int{4, 5, 5, 3, 4}, bPass: []int{1, 5, 5, 5, 5},
+			want: []string{
+				"c1    4/5 (38–96%)",
+				"Compared with a (the first model), case by case:",
+				"b: no significant difference (0 points, 95% interval -46 to +46).",
+				"Only 5 cases",
+			},
+			// 4/5 vs 1/5 sounds decisive, but isn't (p = 0.21).
+			notWant: []string{"better on", "worse on"},
+		},
+		{
+			// 5/5 vs 0/5 is significant even after correcting for 6 cases
+			// (p = 0.048); 5/5 vs 1/5 is not (p = 0.095).
+			name:  "clearly better",
+			aPass: []int{0, 1, 0, 0, 1, 0}, bPass: []int{5, 5, 5, 5, 5, 5},
+			want: []string{
+				"b passes more often: +93 points (95% interval +82 to +100).",
+				"better on c1: 5/5 vs 0/5 (p = 0.048)",
+				"better on c6: 5/5 vs 0/5 (p = 0.048)",
+			},
+			notWant: []string{"better on c2", "better on c5", "worse on"},
+		},
+		{
+			name:  "identical",
+			aPass: []int{5, 0, 5}, bPass: []int{5, 0, 5},
+			want: []string{"b: same pass count on every case."},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -136,13 +171,25 @@ func TestTablePerCaseAndComparison(t *testing.T) {
 				t.Fatal(err)
 			}
 			got := buf.String()
-			if !strings.Contains(got, "Passed, by case:") || !strings.Contains(got, fmt.Sprintf("c     %d/5  %d/5", tt.aPass, tt.bPass)) {
-				t.Errorf("missing per-case table:\n%s", got)
+			for _, want := range append(tt.want, "Passed, by case:") {
+				if !strings.Contains(got, want) {
+					t.Errorf("missing %q:\n%s", want, got)
+				}
 			}
-			if !strings.Contains(got, tt.wantComparison) {
-				t.Errorf("missing %q:\n%s", tt.wantComparison, got)
+			for _, bad := range tt.notWant {
+				if strings.Contains(got, bad) {
+					t.Errorf("unexpected %q:\n%s", bad, got)
+				}
 			}
 		})
+	}
+}
+
+func TestPoints(t *testing.T) {
+	for x, want := range map[float64]string{0: "0", 0.0004: "0", 0.004: "+0.4", -0.003: "-0.3", 0.19: "+19", -0.464: "-46"} {
+		if got := points(x); got != want {
+			t.Errorf("points(%v) = %q, want %q", x, got, want)
+		}
 	}
 }
 

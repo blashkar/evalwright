@@ -33,12 +33,19 @@ func (f *fakeOllama) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer f.mu.Unlock()
 	switch r.URL.Path {
 	case "/api/show":
-		if !f.installed[model] {
+		// Like Ollama, a model named without a tag means its :latest tag.
+		if !f.installed[model] && !f.installed[model+":latest"] {
 			w.WriteHeader(http.StatusNotFound)
 			fmt.Fprintf(w, `{"error":"model '%s' not found"}`, model)
 			return
 		}
-		fmt.Fprint(w, `{"details":{}}`)
+		fmt.Fprint(w, `{"details":{"family":"llama","parameter_size":"3.2B","quantization_level":"Q4_K_M"}}`)
+	case "/api/tags":
+		var models []map[string]string
+		for m := range f.installed {
+			models = append(models, map[string]string{"name": m, "digest": "digest-of-" + m})
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"models": models})
 	case "/api/pull":
 		fmt.Fprintln(w, `{"status":"pulling manifest"}`)
 		fmt.Fprintln(w, `{"status":"pulling abc","digest":"sha256:abc","total":2000000000,"completed":1000000000}`)
@@ -143,15 +150,24 @@ func TestOllamaGenerateOmitsEmptySystem(t *testing.T) {
 
 func TestOllamaPrepare(t *testing.T) {
 	t.Run("installed", func(t *testing.T) {
-		_, client := newFakeOllama(t, "llama3.2:3b")
-		if err := (&Ollama{Client: client}).Prepare(context.Background(), "llama3.2:3b"); err != nil {
-			t.Errorf("Prepare: %v", err)
+		_, client := newFakeOllama(t, "llama3.2:3b", "qwen3:latest")
+		info, err := (&Ollama{Client: client}).Prepare(context.Background(), "llama3.2:3b")
+		if err != nil {
+			t.Fatalf("Prepare: %v", err)
+		}
+		want := ModelInfo{Digest: "digest-of-llama3.2:3b", Family: "llama", ParameterSize: "3.2B", Quantization: "Q4_K_M"}
+		if info != want {
+			t.Errorf("info = %+v, want %+v", info, want)
+		}
+		// A model named without a tag is installed as :latest.
+		if info, err := (&Ollama{Client: client}).Prepare(context.Background(), "qwen3"); err != nil || info.Digest != "digest-of-qwen3:latest" {
+			t.Errorf("untagged model: info = %+v, err = %v", info, err)
 		}
 	})
 
 	t.Run("missing without pull", func(t *testing.T) {
 		_, client := newFakeOllama(t)
-		err := (&Ollama{Client: client}).Prepare(context.Background(), "llama3.2:1b")
+		_, err := (&Ollama{Client: client}).Prepare(context.Background(), "llama3.2:1b")
 		if err == nil || !strings.Contains(err.Error(), "ollama pull llama3.2:1b") {
 			t.Errorf("error = %v, want a hint to pull the model", err)
 		}
@@ -161,10 +177,11 @@ func TestOllamaPrepare(t *testing.T) {
 		fake, client := newFakeOllama(t)
 		var log bytes.Buffer
 		o := &Ollama{Client: client, AutoPull: true, Log: &log}
-		if err := o.Prepare(context.Background(), "llama3.2:1b"); err != nil {
+		info, err := o.Prepare(context.Background(), "llama3.2:1b")
+		if err != nil {
 			t.Fatalf("Prepare: %v", err)
 		}
-		if !fake.isInstalled("llama3.2:1b") {
+		if !fake.isInstalled("llama3.2:1b") || info.Digest != "digest-of-llama3.2:1b" {
 			t.Error("model was not pulled")
 		}
 		for _, want := range []string{"Pulling llama3.2:1b", " 50% of 2.0 GB", "100% of 2.0 GB"} {

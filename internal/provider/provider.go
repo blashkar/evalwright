@@ -61,9 +61,21 @@ type Provider interface {
 // Preparer is implemented by providers that must check or set up a model
 // before it is used, for example making sure it is downloaded. The runner
 // prepares every model before running any case, so a missing model fails
-// the run immediately.
+// the run immediately. Prepare returns what the provider knows about the
+// model.
 type Preparer interface {
-	Prepare(ctx context.Context, model string) error
+	Prepare(ctx context.Context, model string) (ModelInfo, error)
+}
+
+// ModelInfo identifies the exact build of a model. A name such as
+// llama3.2:3b can point to a different build after a new download, so
+// results record the digest to show which build produced them. Fields a
+// provider doesn't know are left empty.
+type ModelInfo struct {
+	Digest        string `json:"digest,omitempty"`
+	Family        string `json:"family,omitempty"`
+	ParameterSize string `json:"parameter_size,omitempty"`
+	Quantization  string `json:"quantization,omitempty"`
 }
 
 // Warmer is implemented by providers that can load a model ahead of time.

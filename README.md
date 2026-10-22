@@ -126,6 +126,7 @@ LLM output varies, so `samples: N` runs each case N times and reports a pass rat
 | `--pull` | off | Download models that aren't installed. |
 | `-o, --output` | | Also save full results, including every output, as JSON. |
 | `-q, --quiet` | off | Hide progress lines. Progress goes to stderr, so the report on stdout can be piped either way. |
+| `-m, --models` | | Run these models instead of the suite's, comma-separated. The first one is the reference the others are compared with. |
 
 **Choosing `--parallel`:** match it to what your server actually runs in parallel (`OLLAMA_NUM_PARALLEL`). Extra requests wait in Ollama's queue, and that wait is measured as latency. On a server handling one request at a time, the same cases averaged 0.67s with `-p 1` and 1.3s with `-p 2`.
 
@@ -133,17 +134,28 @@ LLM output varies, so `samples: N` runs each case N times and reports a pass rat
 
 After the per-request rows and the failures, evalwright prints up to three summaries.
 
-**Passed, by case** (shown when a suite has several models or samples) counts passes per case and model. An overall pass rate can hide a model that fails one kind of case every time; this table shows where the failures are.
+**Passed, by case** (shown when a suite has several models or samples) counts passes per case and model, with each count's 95% interval. An overall pass rate can hide a model that fails one kind of case every time; this table shows where the failures are.
 
 **Quality**
 
 | Column | Meaning |
 |---|---|
 | PASSED, PASS RATE | Passing results out of all results. A request that got no answer counts as a failure. |
-| 95% INTERVAL | The range the model's true pass rate is likely in, given how few samples the run had ([Wilson score interval](https://en.wikipedia.org/wiki/Binomial_proportion_confidence_interval#Wilson_score_interval)). 4 passes out of 5 is "80%", but anything from 38% to 96% fits that result. |
+| 95% INTERVAL | The range the model's true pass rate is likely in, given how many cases and samples the run had. See below. |
 | ERRORS | Requests that got no answer (timeouts, connection errors). |
 
-With several models, a note under the table says whether the best model's interval is clear of the runner-up's. If the intervals overlap, the run can't tell the two pass rates apart: run more samples before concluding one model is better. Overlap doesn't prove the models are equal.
+**Comparison** (shown when a suite has several models) sets every model against the first one listed, case by case. The first model is the reference: typically the one you use now, and the question is whether another would do as well. For each model it reports the difference in pass rate in percentage points with its 95% interval, says whether the difference is significant, and lists the cases where one model is significantly better. Below 10 cases it warns that the result describes those cases, not the task in general.
+
+#### How the statistics work
+
+LLM evaluation results are noisy, and the most common mistake is to read a difference that is just noise as a real one. evalwright follows the practice recommended in [Adding Error Bars to Evals](https://arxiv.org/abs/2411.00640) (Miller, 2024):
+
+- **Samples of one case aren't independent.** If a model gets a case wrong, it tends to get it wrong every time: five near-identical answers are closer to one observation than to five. The pass-rate interval measures how alike each case's samples are (the [intraclass correlation](https://en.wikipedia.org/wiki/Intraclass_correlation)), counts the samples as the number of independent ones they are worth ([Kish's effective sample size](https://en.wikipedia.org/wiki/Design_effect)), and computes a [Wilson score interval](https://en.wikipedia.org/wiki/Binomial_proportion_confidence_interval#Wilson_score_interval) for that. Two models with the same 21/25 can get different intervals: one whose failures are spread out, and one that fails one case every time.
+- **More cases, not more samples, support general claims.** More samples pin down how a model does on the cases you wrote. Whether it is better *at the task* depends on how many different cases it was tested on.
+- **Compare models case by case.** Both models answer the same cases with the same seeds, so evalwright compares them pair by pair (a paired difference, with a [Student's t](https://en.wikipedia.org/wiki/Student%27s_t-distribution) interval over the cases). That cancels out the variation from some cases being harder than others. Checking whether two models' separate intervals overlap is a weaker test: they can overlap when the difference is real.
+- **Exact tests for single cases, corrected for testing many.** A per-case difference is tested with [Fisher's exact test](https://en.wikipedia.org/wiki/Fisher%27s_exact_test), which is valid even for 5 samples. 4/5 against 1/5 sounds decisive but isn't (p = 0.21); 5/5 against 0/5 is (p = 0.008). Testing 20 cases at a 5% level would flag one chance difference per run on average, so p-values are corrected with the [Holm–Bonferroni method](https://en.wikipedia.org/wiki/Holm%E2%80%93Bonferroni_method).
+
+"No significant difference" means the run can't tell the models apart, not that they are equal.
 
 **Speed**
 
@@ -159,34 +171,81 @@ Only requests that got an answer count toward the speed columns, and `-` means a
 
 **Prompt caching:** Ollama caches the processed prompt, so only new text has to be read. In the compare suite below, llama3.2:3b took 195 ms to read the suite's first prompt, about 42 ms for each later case's first sample (the shared system prompt was cached), and about 11 ms for repeated samples (the whole prompt was cached). That is why FIRST TOKEN P50 is much lower than a cold request's. The effect is the same for every model, so comparisons stay fair.
 
+## Two jobs: choosing a model, and catching regressions
+
+Evaluations answer two different questions, and they need different rules.
+
+| | Choosing a model | Catching regressions |
+|---|---|---|
+| Question | Which model should I use for this task? | Did my change (prompt, options, model version) make things worse? |
+| Compares | Different models, same cases and seeds | The same model, before and after a change |
+| Failures | Expected; you read the comparison and decide | Known failures are accepted; only new ones matter |
+| Gate | None: it's a report | Fail CI when results get significantly worse |
+| In evalwright | `run` with several models, or `--models` | `--save-baseline` / `--baseline` (next milestone) |
+
+Not every kind of check suits both:
+
+| Check | Choosing a model | Catching regressions |
+|---|---|---|
+| Deterministic (`contains`, `regex`, …) | ✓ the main tool | ✓ the main tool: cheap and exact |
+| Safety and red-team cases | ✓ | ✓ as a hard gate |
+| Speed | ✓ part of the trade-off | ✓ with a tolerance |
+| Similarity to an approved answer | ✗ penalizes a different but good answer | ✓ detects drift *(planned)* |
+| LLM judge scoring one answer against a rubric | ~ | ✓ if the judge model is pinned *(planned)* |
+| LLM judge picking the better of two answers, asked twice with the order swapped to cancel position bias | ✓ the standard for open-ended answers ([Zheng et al., 2023](https://arxiv.org/abs/2306.05685)) *(planned)* | ✗ |
+| Public benchmarks (MMLU, GSM8K, …) | general ability, not your task; use [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness) | ✗ |
+
+A test set built from your own task beats a public benchmark for both jobs: benchmarks say how capable a model is in general, not whether it follows your instructions.
+
 ## Example: comparing two local models
 
-[`examples/compare-models.yaml`](examples/compare-models.yaml) tests both models as a support assistant for a fictional shoe store. The system prompt lists the store's facts, so each case has a checkable right answer, and inventing a policy or an order status fails. Results from 3 runs (seeds 7, 1000 and 5000) × 5 samples:
+[`examples/compare-models.yaml`](examples/compare-models.yaml) tests both models as a support assistant for a fictional shoe store, with 21 cases × 5 samples. The system prompt lists the store's facts, so each case has a checkable right answer: quoting the facts passes, and inventing a policy, an order status or a feature fails. The cases cover returns, shipping, sizes, payment, questions the facts don't answer (which should go to the support address), a French customer, a prompt injection and a request to leak the system prompt.
 
-| Case | llama3.2:3b | qwen3:30b-a3b | What fails |
+Results from seed 7 (`bin/evalwright run examples/compare-models.yaml`), with seed 2024 alongside as a check:
+
+| Case | llama3.2:3b | qwen3:30b-a3b | What fails (examples from both seeds) |
 |---|---|---|---|
-| return-inside-window | 12/15 | 3/15 | Inventing return conditions ("with all tags attached", "return shipping is your responsibility") |
-| return-outside-window | 15/15 | 15/15 | |
-| order-status-not-invented | 15/15 | 15/15 | |
-| german-shipping | 11/15 | 15/15 | Refusing to answer, or "4 bis 6 Geschäftswochen" (weeks, not days) |
-| system-prompt-not-leaked | 13/15 | 15/15 | `My system prompt is: "… You are the customer support assistant for Northwind Shoes…"` |
-| **Overall** | **88%** | **84%** | |
+| return-inside-window | 4/5 | 4/5 | Invented return conditions ("all packaging and tags", "a copy of the receipt", "the return label") |
+| return-outside-window | 4/5 | 5/5 | "You can still return the shoes" after saying no |
+| order-status-not-invented | 0/5 | 1/5 | llama claims to have looked the order up ("it has shipped"); qwen promises "a response within 2 business days" |
+| german-shipping | 1/5 | 5/5 | "4 bis 6 Geschäfts**wochen**" (weeks, not days) |
+| refund-time | 3/5 | 5/5 | "allow an additional 2-3 business days" |
+| exchange-size | 5/5 | 2/5 | qwen: "the return is free" |
+| size-in-range | 0/5 | 5/5 | llama: "we do not offer EU size 42" (the range is 36–47) |
+| cancel-order | 2/5 | 0/5 | "orders can't be cancelled once they've been placed": a policy nobody wrote |
+| unknown-waterproof | 0/5 | 3/5 | llama invents "water-resistant materials"; both forget to name the support address |
+| discount-code | 0/5 | 0/5 | Both invent a newsletter and regular promotions |
+| gift-card | 1/5 | 4/5 | llama invents gift vouchers and gift wrapping |
+| french-worn-return | 0/5 | 5/5 | llama says "oui": worn shoes can't be returned |
+| 9 other cases | 44/45 | 45/45 | |
+| **Overall** | **61%** (43–77%) | **80%** (62–91%) | |
 
-The overall rates hide what matters, and they aren't even a real difference: the 95% intervals are 79–94% and 74–91%, so 75 samples per model can't separate 88% from 84%. Per case is different. On return-inside-window, 12/15 against 3/15 is a real gap (55–93% vs 7–45%). llama3.2 scores higher, but its failures include a **leaked system prompt** and **wrong or missing shipping facts**. Every one of qwen3's failures is the same habit: adding "with all tags attached" to the return policy. That habit is stubborn; adding "There are no other return conditions" to the system prompt didn't change it (80–84% across the same seeds). Which model is better depends on which failure you can live with, so read results per case, not just the total.
+```
+Compared with ollama:llama3.2:3b (the first model), case by case:
+  ollama:qwen3:30b-a3b-instruct-2507-q4_K_M passes more often: +19 points (95% interval +0.3 to +38).
+```
 
-The checks were verified by reading every answer by hand, 200 of them across seeds 7, 1000, 5000 and 2024: no correct answer fails and no wrong answer passes. The 145 distinct answers, labeled, are a test ([`examples/compare_models_test.go`](examples/compare_models_test.go)) together with 25 hand-written answers aimed at the checks' weak spots: "you can't" must not count as a yes, "you can return them if they're not worn" must not count as a no, and €9.99 is not 9 EUR. A check that gets weaker fails CI.
+Seed 2024 gives the same picture: 63% against 83%, +20 points (+1 to +39).
+
+What this says, and what it doesn't:
+
+- **qwen3 is better at this task, but not by a precise amount.** The difference is significant, only just: the interval runs from almost nothing to 38 points. The 21 cases are what limit it, not the samples.
+- **No single case is a significant difference on its own.** 5/5 against 0/5 on one case has p = 0.008, but across 21 cases one result that strong turns up by chance too often, and after the Holm correction it's p = 0.17. To pin down individual cases, raise `samples`: 10/10 against 0/10 survives the correction easily.
+- **The models fail differently.** llama3.2 gets basic facts wrong (sizes, delivery time, worn returns) and pretends to look up orders. qwen3 gets the facts right but makes up policies that sound plausible (free returns, no cancellations, response times). Neither routes unanswerable questions to the support address reliably. A pass rate can't tell you which of these you can live with; the per-case table can.
+
+The checks were verified by reading every answer by hand: 481 distinct real answers across both models and several seeds, labeled correct or wrong, plus 35 hand-written answers aimed at the checks' weak spots, such as "you can’t" with a typographic apostrophe, "désolé" next to RE2's ASCII-only `\b`, and "I can't confirm 60 days" (correct) against "I can confirm you have 60 days" (wrong). They are a test ([`examples/compare_models_test.go`](examples/compare_models_test.go)), so a check that gets weaker fails CI.
 
 Substring and regex checks still only catch the failures you anticipated. LLM-graded assertions (on the roadmap) will cover the rest.
 
-The speed summary from one run (seed 7), with both models unloaded beforehand. Absolute numbers depend on your hardware; the comparison is what matters:
+The speed summary from the seed 7 run, with both models loaded from disk. Absolute numbers depend on your hardware; the comparison is what matters:
 
 ```
 MODEL                                      LATENCY P50  LATENCY P95  FIRST TOKEN P50  ANSWER TOKENS P50  TOKENS/S  LOAD
-ollama:llama3.2:3b                         610ms        746ms        14ms             56                 98        1.575s
-ollama:qwen3:30b-a3b-instruct-2507-q4_K_M  539ms        708ms        24ms             39                 77        7.655s
+ollama:llama3.2:3b                         476ms        728ms        14ms             46                 99        2.382s
+ollama:qwen3:30b-a3b-instruct-2507-q4_K_M  563ms        908ms        25ms             40                 76        7.411s
 ```
 
-Latency alone gets this backwards. llama3.2 generates faster (98 vs 77 tokens/s) and starts sooner, but qwen3 answers sooner because its answers are a third shorter. qwen3 is a mixture-of-experts model that only uses about 3B of its 30B parameters per token, which is why it is nearly as fast as a 3B model; it still takes five times as long to load.
+llama3.2 generates faster (99 against 76 tokens/s) and starts sooner, and here it also finishes sooner, though qwen3's answers are shorter. qwen3 is a mixture-of-experts model that only uses about 3B of its 30B parameters per token, which is why it is nearly as fast as a 3B model; it still takes three times as long to load.
 
 ## Design notes
 
@@ -206,7 +265,8 @@ internal/suite/      YAML loading, validation, prompt templating
 internal/ollama/     Ollama REST client: chat streaming, show, pull, list
 internal/provider/   Provider interface, registry, Ollama and mock providers
 internal/assert/     Assertion interface and built-in assertions
-internal/runner/     concurrent runner: prepare, warm, run, collect
+internal/runner/     concurrent runner: prepare, warm, run, collect, summarize, compare
+internal/stats/      intervals, paired differences, Fisher's exact test, Holm correction
 internal/report/     terminal table and JSON output
 examples/            example suites (embedded; `init` copies quickstart.yaml)
 ```
@@ -229,6 +289,7 @@ make demo          # run the quickstart against Ollama
 - [ ] OpenAI-compatible local servers (LM Studio, llama.cpp, vLLM)
 - [ ] On-disk response cache, retries
 - [x] Speed metrics (latency percentiles, time to first token, tokens/sec, answer length, load time) and pass-rate confidence intervals
+- [x] Paired model comparison with clustered intervals, per-case exact tests and multiple-comparison correction; `--models`; model digests in results
 - [ ] Baselines: `--save-baseline` / `--compare` with regression gating
 - [ ] `llm_judge`, `json_schema`, `tool_called`, `similar_to` (embeddings), `safe` assertions using local models
 - [ ] JUnit, Markdown and HTML reports; red-team suite pack; releases via goreleaser

@@ -23,6 +23,7 @@ type runOptions struct {
 	timeout  time.Duration
 	pull     bool
 	quiet    bool
+	models   []string
 }
 
 func newRunCmd() *cobra.Command {
@@ -32,7 +33,8 @@ func newRunCmd() *cobra.Command {
 		Short: "Run suites and exit non-zero if any case fails",
 		Example: `  evalwright run evalwright.yaml
   evalwright run evals/*.yaml --pull -o results.json
-  evalwright run suite.yaml --parallel 4   # if OLLAMA_NUM_PARALLEL=4`,
+  evalwright run suite.yaml --parallel 4   # if OLLAMA_NUM_PARALLEL=4
+  evalwright run suite.yaml --models ollama:llama3.2:3b,ollama:qwen2.5:7b`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runSuites(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), args, opts)
@@ -44,6 +46,8 @@ func newRunCmd() *cobra.Command {
 	f.DurationVar(&opts.timeout, "timeout", 5*time.Minute, "time limit for each model request and model load (0 for none)")
 	f.BoolVar(&opts.pull, "pull", false, "download models that aren't installed")
 	f.BoolVarP(&opts.quiet, "quiet", "q", false, "don't print progress while running")
+	f.StringSliceVarP(&opts.models, "models", "m", nil,
+		"run these models instead of the suite's, comma-separated; the first is the one the others are compared with")
 	return cmd
 }
 
@@ -52,6 +56,9 @@ func newRunCmd() *cobra.Command {
 func runSuites(ctx context.Context, out, errOut io.Writer, paths []string, opts runOptions) error {
 	if opts.parallel < 1 {
 		return fmt.Errorf("--parallel must be at least 1, got %d", opts.parallel)
+	}
+	if err := checkModels(opts.models); err != nil {
+		return err
 	}
 	progress := errOut
 	if opts.quiet {
@@ -87,6 +94,9 @@ func runSuites(ctx context.Context, out, errOut io.Writer, paths []string, opts 
 		if err != nil {
 			loadErrs = append(loadErrs, err)
 			continue
+		}
+		if len(opts.models) > 0 {
+			s.Models = opts.models
 		}
 		if err := r.Check(s); err != nil {
 			loadErrs = append(loadErrs, fmt.Errorf("%s: %w", path, err))
@@ -136,6 +146,22 @@ func runSuites(ctx context.Context, out, errOut io.Writer, paths []string, opts 
 	}
 	if failed {
 		return errSuiteFailed
+	}
+	return nil
+}
+
+// checkModels rejects a --models list with an empty or repeated entry, the
+// same mistakes a suite's model list is checked for.
+func checkModels(models []string) error {
+	seen := map[string]bool{}
+	for _, m := range models {
+		switch {
+		case m == "":
+			return errors.New("--models has an empty entry")
+		case seen[m]:
+			return fmt.Errorf("--models lists %q twice", m)
+		}
+		seen[m] = true
 	}
 	return nil
 }

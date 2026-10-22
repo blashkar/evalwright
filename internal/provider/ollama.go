@@ -58,22 +58,49 @@ func (o *Ollama) Generate(ctx context.Context, req Request) (Response, error) {
 }
 
 // Prepare implements Preparer. It checks that model is installed and, if
-// AutoPull is set, downloads it when it isn't.
-func (o *Ollama) Prepare(ctx context.Context, model string) error {
-	_, err := o.Client.Show(ctx, model)
-	switch {
-	case err == nil:
-		return nil
-	case !ollama.IsNotFound(err):
-		return err
-	case !o.AutoPull:
-		return fmt.Errorf("model %q is not installed; run `ollama pull %s` or pass --pull", model, model)
+// AutoPull is set, downloads it when it isn't. It returns the model's
+// digest, size and quantization.
+func (o *Ollama) Prepare(ctx context.Context, model string) (ModelInfo, error) {
+	show, err := o.Client.Show(ctx, model)
+	if err != nil {
+		switch {
+		case !ollama.IsNotFound(err):
+			return ModelInfo{}, err
+		case !o.AutoPull:
+			return ModelInfo{}, fmt.Errorf("model %q is not installed; run `ollama pull %s` or pass --pull", model, model)
+		}
+		if err := o.pull(ctx, model); err != nil {
+			return ModelInfo{}, fmt.Errorf("pulling %s: %w", model, err)
+		}
+		if show, err = o.Client.Show(ctx, model); err != nil {
+			return ModelInfo{}, err
+		}
+	}
+	info := ModelInfo{
+		Family:        show.Details.Family,
+		ParameterSize: show.Details.ParameterSize,
+		Quantization:  show.Details.QuantizationLevel,
 	}
 
+	// /api/show doesn't report the digest; the list of installed models does.
+	models, err := o.Client.List(ctx)
+	if err != nil {
+		return ModelInfo{}, err
+	}
+	for _, m := range models {
+		if m.Name == model || m.Name == model+":latest" {
+			info.Digest = m.Digest
+			break
+		}
+	}
+	return info, nil
+}
+
+func (o *Ollama) pull(ctx context.Context, model string) error {
 	o.logf("Pulling %s...\n", model)
 	var digest string
 	lastPct := -1
-	err = o.Client.Pull(ctx, model, func(p ollama.PullProgress) error {
+	return o.Client.Pull(ctx, model, func(p ollama.PullProgress) error {
 		if p.Total == 0 {
 			return nil
 		}
@@ -87,10 +114,6 @@ func (o *Ollama) Prepare(ctx context.Context, model string) error {
 		}
 		return nil
 	})
-	if err != nil {
-		return fmt.Errorf("pulling %s: %w", model, err)
-	}
-	return nil
 }
 
 // Warm implements Warmer.
