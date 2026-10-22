@@ -4,9 +4,14 @@ import "time"
 
 // ModelSummary aggregates one model's results across all cases and samples.
 type ModelSummary struct {
-	Model       string
-	Passed      int
-	Total       int
+	Model  string
+	Passed int
+	Total  int
+	// Errors counts requests that got no answer (timeouts, connection errors).
+	Errors int
+	// MeanLatency averages only requests that got an answer. Counting a
+	// failed request's zero latency would make an unreliable model look fast.
+	// It is zero if no request got an answer.
 	MeanLatency time.Duration
 }
 
@@ -35,10 +40,16 @@ func (r *Report) Summary() []ModelSummary {
 		if res.Pass {
 			out[i].Passed++
 		}
+		if res.Error != "" {
+			out[i].Errors++
+			continue
+		}
 		latency[res.Model] += res.Latency
 	}
 	for i := range out {
-		out[i].MeanLatency = latency[out[i].Model] / time.Duration(out[i].Total)
+		if answered := out[i].Total - out[i].Errors; answered > 0 {
+			out[i].MeanLatency = latency[out[i].Model] / time.Duration(answered)
+		}
 	}
 	return out
 }

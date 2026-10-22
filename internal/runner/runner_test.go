@@ -214,7 +214,7 @@ cases: [{assert: [{equals: ok}]}]
 	if _, err := r.Run(context.Background(), s); err != nil {
 		t.Fatal(err)
 	}
-	if got.Model != "m1" || got.System != "Be brief." || got.Options["seed"] != 42 {
+	if got.Model != "m1" || got.System != "Be brief." || got.Options["seed"] != int64(42) {
 		t.Errorf("request = %+v", got)
 	}
 }
@@ -336,5 +336,78 @@ func (c ctxAware) Generate(ctx context.Context, req provider.Request) (provider.
 		return o.resp, o.err
 	case <-ctx.Done():
 		return provider.Response{}, ctx.Err()
+	}
+}
+
+func TestRunDerivesSeedPerSample(t *testing.T) {
+	var mu sync.Mutex
+	seen := map[int]any{} // sample prompt index -> seed sent
+	m := &provider.Mock{Reply: func(req provider.Request) (string, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		seen[len(seen)] = req.Options["seed"]
+		return "ok", nil
+	}}
+	s := mustParse(t, `
+name: seeds
+models: [mock:a]
+options: {temperature: 0.7, seed: 7}
+samples: 3
+prompt: hi
+cases: [{assert: [{equals: ok}]}]
+`)
+	r := Runner{Providers: provider.Registry{"mock": m}, Parallel: 3}
+	rep, err := r.Run(context.Background(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for i, res := range rep.Results {
+		if want := int64(7 + i); res.Seed == nil || *res.Seed != want {
+			t.Errorf("sample %d recorded seed %v, want %d", res.Sample, res.Seed, want)
+		}
+	}
+	var sent []int64
+	for _, v := range seen {
+		sent = append(sent, v.(int64))
+	}
+	slices.Sort(sent)
+	if !slices.Equal(sent, []int64{7, 8, 9}) {
+		t.Errorf("seeds sent to the model = %v, want [7 8 9]", sent)
+	}
+	if s.Options["seed"] != 7 {
+		t.Errorf("suite options were modified: seed = %v", s.Options["seed"])
+	}
+}
+
+func TestRunWithoutSeedSendsNone(t *testing.T) {
+	var got provider.Request
+	m := &provider.Mock{Reply: func(req provider.Request) (string, error) {
+		got = req
+		return "ok", nil
+	}}
+	s := mustParse(t, "name: s\nmodels: [mock:a]\noptions: {temperature: 0.7}\nprompt: hi\ncases: [{assert: [{equals: ok}]}]\n")
+	rep, err := (&Runner{Providers: provider.Registry{"mock": m}}).Run(context.Background(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := got.Options["seed"]; ok || rep.Results[0].Seed != nil {
+		t.Errorf("a seed was invented: options %v, recorded %v", got.Options, rep.Results[0].Seed)
+	}
+}
+
+func TestSummaryLatencyIgnoresErrors(t *testing.T) {
+	rep := &Report{Results: []Result{
+		{Model: "m", Latency: 100 * time.Millisecond, Pass: true},
+		{Model: "m", Latency: 300 * time.Millisecond},
+		{Model: "m", Error: "timed out after 1s"}, // no answer, so no latency
+		{Model: "down", Error: "connection refused"},
+	}}
+	sum := rep.Summary()
+	if m := sum[0]; m.MeanLatency != 200*time.Millisecond || m.Errors != 1 || m.Total != 3 {
+		t.Errorf("summary = %+v, want mean 200ms over the 2 answered requests and 1 error", m)
+	}
+	if d := sum[1]; d.MeanLatency != 0 || d.Errors != 1 {
+		t.Errorf("summary for a model with no answers = %+v", d)
 	}
 }

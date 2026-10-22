@@ -39,9 +39,13 @@ func Table(w io.Writer, rep *runner.Report) error {
 
 	fmt.Fprintln(w)
 	tw = tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "MODEL\tPASSED\tPASS RATE\tMEAN LATENCY")
+	fmt.Fprintln(tw, "MODEL\tPASSED\tPASS RATE\tERRORS\tMEAN LATENCY")
 	for _, m := range rep.Summary() {
-		fmt.Fprintf(tw, "%s\t%d/%d\t%.0f%%\t%s\n", m.Model, m.Passed, m.Total, m.PassRate()*100, m.MeanLatency.Round(time.Millisecond))
+		latency := "-" // no request got an answer
+		if m.Errors < m.Total {
+			latency = m.MeanLatency.Round(time.Millisecond).String()
+		}
+		fmt.Fprintf(tw, "%s\t%d/%d\t%.0f%%\t%d\t%s\n", m.Model, m.Passed, m.Total, m.PassRate()*100, m.Errors, latency)
 	}
 	if err := tw.Flush(); err != nil {
 		return err

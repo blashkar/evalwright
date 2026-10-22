@@ -77,24 +77,40 @@ func (a contains) Check(_ context.Context, out Output) Result {
 	return pass()
 }
 
-type regex struct{ re *regexp.Regexp }
-
-func newRegex(decode func(any) error) (Assertion, error) {
-	var s string
-	if err := decode(&s); err != nil {
-		return nil, err
-	}
-	re, err := regexp.Compile(s)
-	if err != nil {
-		return nil, err
-	}
-	return regex{re: re}, nil
+// regex covers regex and not_regex.
+type regex struct {
+	re     *regexp.Regexp
+	negate bool
 }
 
-func (a regex) Name() string { return fmt.Sprintf("regex /%s/", a.re) }
+func newRegex(negate bool) builder {
+	return func(decode func(any) error) (Assertion, error) {
+		var s string
+		if err := decode(&s); err != nil {
+			return nil, err
+		}
+		re, err := regexp.Compile(s)
+		if err != nil {
+			return nil, err
+		}
+		return regex{re: re, negate: negate}, nil
+	}
+}
+
+func (a regex) Name() string {
+	if a.negate {
+		return fmt.Sprintf("not_regex /%s/", a.re)
+	}
+	return fmt.Sprintf("regex /%s/", a.re)
+}
 
 func (a regex) Check(_ context.Context, out Output) Result {
-	if !a.re.MatchString(out.Text) {
+	match := a.re.FindString(out.Text)
+	switch {
+	case a.negate && match != "":
+		// Quote what matched; with alternations it's not obvious which part did.
+		return fail("output matches /%s/ at %q", a.re, match)
+	case !a.negate && match == "":
 		return fail("output does not match /%s/", a.re)
 	}
 	return pass()

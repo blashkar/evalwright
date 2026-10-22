@@ -1,6 +1,7 @@
 package suite
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -138,5 +139,86 @@ func TestLoadPromptFile(t *testing.T) {
 	}
 	if got != "Hello Go" {
 		t.Errorf("Render = %q, want %q", got, "Hello Go")
+	}
+}
+
+func TestSampleSeed(t *testing.T) {
+	tests := []struct {
+		name    string
+		options string
+		want    []int64 // seeds for samples 1..3; nil means no seed
+	}{
+		{"no seed", "{temperature: 0.7}", nil},
+		{"int seed", "{seed: 7}", []int64{7, 8, 9}},
+		{"zero seed", "{seed: 0}", []int64{0, 1, 2}},
+		{"negative seed", "{seed: -2}", []int64{-2, -1, 0}},
+		{"whole float seed", "{seed: 42.0}", []int64{42, 43, 44}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			src := "name: x\nmodels: [m:a]\nprompt: p\nsamples: 3\noptions: " + tt.options + "\ncases: [{assert: [{contains: a}]}]\n"
+			s, err := Parse(strings.NewReader(src), "test.yaml")
+			if err != nil {
+				t.Fatal(err)
+			}
+			for n := 1; n <= 3; n++ {
+				got, ok := s.SampleSeed(n)
+				if tt.want == nil {
+					if ok {
+						t.Errorf("SampleSeed(%d) = %d, want no seed", n, got)
+					}
+					continue
+				}
+				if !ok || got != tt.want[n-1] {
+					t.Errorf("SampleSeed(%d) = %d, %v; want %d", n, got, ok, tt.want[n-1])
+				}
+			}
+		})
+	}
+}
+
+func TestOptionsValidation(t *testing.T) {
+	tests := []struct {
+		options, wantErr string
+	}{
+		{"{seed: 4.5}", "options.seed must be a whole number, got 4.5"},
+		{`{seed: "abc"}`, "options.seed must be a whole number"},
+		{`{temperature: hot}`, "options.temperature must be a number"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.options, func(t *testing.T) {
+			src := "name: x\nmodels: [m:a]\nprompt: p\noptions: " + tt.options + "\ncases: [{assert: [{contains: a}]}]\n"
+			_, err := Parse(strings.NewReader(src), "test.yaml")
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error = %v, want it to contain %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestWarnings(t *testing.T) {
+	tests := []struct {
+		name     string
+		samples  int
+		options  string
+		wantWarn bool
+	}{
+		{"greedy decoding with samples", 3, "{temperature: 0}", true},
+		{"greedy decoding with samples (float)", 3, "{temperature: 0.0}", true},
+		{"greedy decoding single sample", 1, "{temperature: 0}", false},
+		{"sampling temperature", 3, "{temperature: 0.7}", false},
+		{"no temperature (server default)", 3, "{}", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			src := fmt.Sprintf("name: x\nmodels: [m:a]\nprompt: p\nsamples: %d\noptions: %s\ncases: [{assert: [{contains: a}]}]\n", tt.samples, tt.options)
+			s, err := Parse(strings.NewReader(src), "test.yaml")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := len(s.Warnings()) > 0; got != tt.wantWarn {
+				t.Errorf("warnings = %v, want warning: %v", s.Warnings(), tt.wantWarn)
+			}
+		})
 	}
 }

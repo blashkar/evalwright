@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"sync"
 	"time"
 
@@ -27,9 +28,12 @@ type Result struct {
 	Sample  int           `json:"sample"`
 	Output  string        `json:"output"`
 	Latency time.Duration `json:"latency_ns"`
-	Error   string        `json:"error,omitempty"`
-	Checks  []CheckResult `json:"checks,omitempty"`
-	Pass    bool          `json:"pass"`
+	// Seed is the seed this sample was generated with, if the suite sets one,
+	// so a surprising answer can be reproduced exactly.
+	Seed   *int64        `json:"seed,omitempty"`
+	Error  string        `json:"error,omitempty"`
+	Checks []CheckResult `json:"checks,omitempty"`
+	Pass   bool          `json:"pass"`
 }
 
 // Report holds every result from one suite run.
@@ -234,6 +238,14 @@ func (r *Runner) report(res Result) {
 func (r *Runner) runOne(ctx context.Context, t target, s *suite.Suite, j job) Result {
 	res := Result{Case: j.c.Name, Model: t.spec, Sample: j.sample}
 
+	opts := s.Options
+	if seed, ok := s.SampleSeed(j.sample); ok {
+		// Copy rather than modify: every goroutine shares s.Options.
+		opts = maps.Clone(s.Options)
+		opts["seed"] = seed
+		res.Seed = &seed
+	}
+
 	reqCtx := ctx
 	if r.CaseTimeout > 0 {
 		var cancel context.CancelFunc
@@ -241,7 +253,7 @@ func (r *Runner) runOne(ctx context.Context, t target, s *suite.Suite, j job) Re
 		defer cancel()
 	}
 
-	req := provider.Request{Model: t.model, System: s.System, Prompt: j.c.prompt, Options: s.Options}
+	req := provider.Request{Model: t.model, System: s.System, Prompt: j.c.prompt, Options: opts}
 	resp, err := t.p.Generate(reqCtx, req)
 	if err != nil {
 		// A failed request is a failed case, not a fatal error: one slow or

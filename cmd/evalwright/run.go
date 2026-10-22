@@ -85,6 +85,10 @@ func runSuites(ctx context.Context, out, errOut io.Writer, paths []string, opts 
 		if err != nil {
 			return err
 		}
+		// Warnings point at likely mistakes, so they are shown even with --quiet.
+		for _, w := range s.Warnings() {
+			fmt.Fprintf(errOut, "warning: %s: %s\n", path, w)
+		}
 		if i > 0 {
 			fmt.Fprintln(out)
 		}

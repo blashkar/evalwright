@@ -42,6 +42,7 @@ func TestTable(t *testing.T) {
 		"error: connection refused",
 		"1/3",
 		"33%",
+		"30ms", // mean of the 2 answered requests; the error isn't counted
 		"FAIL  demo in 1.5s",
 	} {
 		if !strings.Contains(got, want) {

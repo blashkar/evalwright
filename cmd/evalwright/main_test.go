@@ -111,3 +111,14 @@ func TestRunRejectsBadParallel(t *testing.T) {
 		t.Errorf("error = %v", err)
 	}
 }
+
+func TestRunPrintsSuiteWarningsEvenWhenQuiet(t *testing.T) {
+	path := writeSuite(t, "name: x\nmodels: [mock:echo]\noptions: {temperature: 0}\nsamples: 3\nprompt: hi\ncases: [{assert: [{contains: hi}]}]\n")
+	_, stderr, err := execute(t, "run", path, "-q")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stderr, "warning: ") || !strings.Contains(stderr, "every sample gives the same answer") {
+		t.Errorf("stderr missing temperature warning:\n%s", stderr)
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,7 +18,8 @@ import (
 type Suite struct {
 	Name   string   `yaml:"name"`
 	Models []string `yaml:"models"`
-	// Options are passed to every model, e.g. {temperature: 0, seed: 42}.
+	// Options are passed to every model, e.g. {temperature: 0.7, seed: 42}.
+	// A seed is the seed of the first sample; see SampleSeed.
 	Options    map[string]any `yaml:"options"`
 	System     string         `yaml:"system"`
 	Prompt     string         `yaml:"prompt"`
@@ -147,7 +149,79 @@ func (s *Suite) validate() error {
 			errs = append(errs, fmt.Errorf("case %q: at least one assertion is required", c.Name))
 		}
 	}
+	if v, ok := s.Options["seed"]; ok {
+		if _, ok := wholeNumber(v); !ok {
+			errs = append(errs, fmt.Errorf("options.seed must be a whole number, got %v", v))
+		}
+	}
+	if v, ok := s.Options["temperature"]; ok {
+		if _, ok := number(v); !ok {
+			errs = append(errs, fmt.Errorf("options.temperature must be a number, got %v", v))
+		}
+	}
 	return errors.Join(errs...)
+}
+
+// SampleSeed returns the seed for sample n (counting from 1), and false if
+// the suite doesn't set a seed.
+//
+// Sample n uses seed+n-1. With one fixed seed every sample would produce the
+// exact same answer, and a pass rate over identical answers measures nothing.
+// Deriving a seed per sample keeps the samples independent while the whole
+// run stays reproducible.
+func (s *Suite) SampleSeed(n int) (int64, bool) {
+	v, ok := s.Options["seed"]
+	if !ok {
+		return 0, false
+	}
+	seed, _ := wholeNumber(v) // checked in validate
+	return seed + int64(n-1), true
+}
+
+// Warnings reports settings that are valid but probably not what the author
+// intended, such as sampling a model whose output can't vary.
+func (s *Suite) Warnings() []string {
+	var warns []string
+	if t, ok := number(s.Options["temperature"]); ok && t == 0 && s.Samples > 1 {
+		warns = append(warns, fmt.Sprintf(
+			"samples is %d but options.temperature is 0, so every sample gives the same answer; "+
+				"raise the temperature (e.g. 0.7) to measure how answers vary, or use samples: 1", s.Samples))
+	}
+	return warns
+}
+
+// wholeNumber converts a YAML-decoded value to int64 if it is a whole number.
+func wholeNumber(v any) (int64, bool) {
+	switch n := v.(type) {
+	case int:
+		return int64(n), true
+	case int64:
+		return n, true
+	case uint64:
+		if n <= math.MaxInt64 {
+			return int64(n), true
+		}
+	case float64:
+		if n == math.Trunc(n) && math.Abs(n) <= 1<<53 {
+			return int64(n), true
+		}
+	}
+	return 0, false
+}
+
+// number converts a YAML-decoded value to float64 if it is numeric.
+func number(v any) (float64, bool) {
+	switch n := v.(type) {
+	case int:
+		return float64(n), true
+	case int64:
+		return float64(n), true
+	case uint64:
+		return float64(n), true
+	case float64:
+		return n, true
+	}
+	return 0, false
 }
 
 // Render fills the prompt template with the case's variables.

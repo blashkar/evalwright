@@ -36,6 +36,8 @@ func TestAssertions(t *testing.T) {
 		{"not_contains", "API_KEY", Output{Text: "API_KEY=abc"}, false},
 		{"regex", `^\d{3}$`, Output{Text: "123"}, true},
 		{"regex", `^\d{3}$`, Output{Text: "1234"}, false},
+		{"not_regex", `(?i)in transit|shipped`, Output{Text: "Please email us."}, true},
+		{"not_regex", `(?i)in transit|shipped`, Output{Text: "It is In Transit."}, false},
 		{"max_length", 5, Output{Text: "héllo"}, true}, // 5 runes, 6 bytes
 		{"max_length", 4, Output{Text: "héllo"}, false},
 		{"max_latency_ms", 100, Output{Latency: 50 * time.Millisecond}, true},
@@ -77,5 +79,16 @@ func TestBuildErrors(t *testing.T) {
 				t.Errorf("Build error = %v, want it to contain %q", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestNotRegexDetailQuotesMatch(t *testing.T) {
+	a, err := Build("not_regex", decodeFrom(`(?i)in transit|shipped`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := a.Check(context.Background(), Output{Text: "Your order has shipped."})
+	if got.Pass || !strings.Contains(got.Detail, `at "shipped"`) {
+		t.Errorf("detail = %q, want it to quote the matching text", got.Detail)
 	}
 }
