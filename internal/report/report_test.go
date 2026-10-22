@@ -42,10 +42,17 @@ func TestTable(t *testing.T) {
 		"error: connection refused",
 		"1/3",
 		"33%",
+		"30ms", // mean of the 2 answered requests; the error isn't counted
 		"FAIL  demo in 1.5s",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("table output missing %q\n--- output ---\n%s", want, got)
+		}
+	}
+	// A request that got no answer has no latency, not a latency of 0s.
+	for line := range strings.Lines(got) {
+		if f := strings.Fields(line); len(f) == 5 && f[0] == "down" && f[4] != "-" {
+			t.Errorf("error row latency = %q, want -", f[4])
 		}
 	}
 }
@@ -69,5 +76,26 @@ func TestExcerptTruncates(t *testing.T) {
 	got := excerpt(long)
 	if want := maxOutputExcerpt + 1; len([]rune(got)) != want { // +1 for the ellipsis
 		t.Errorf("excerpt has %d runes, want %d", len([]rune(got)), want)
+	}
+}
+
+func TestTableInterrupted(t *testing.T) {
+	tests := []struct {
+		name string
+		rep  *runner.Report
+	}{
+		{"before any result", &runner.Report{Suite: "demo", Interrupted: true}},
+		{"after some passed", &runner.Report{Suite: "demo", Interrupted: true, Results: []runner.Result{{Case: "a", Model: "m", Sample: 1, Pass: true}}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			if err := Table(&buf, tt.rep); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(buf.String(), "INTERRUPTED  demo") || strings.Contains(buf.String(), "PASS  demo") {
+				t.Errorf("an interrupted run must say INTERRUPTED, never PASS:\n%s", buf.String())
+			}
+		})
 	}
 }

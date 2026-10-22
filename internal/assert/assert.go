@@ -40,7 +40,8 @@ var builders = map[string]builder{
 	"contains":       newContains(false, false),
 	"icontains":      newContains(false, true),
 	"not_contains":   newContains(true, false),
-	"regex":          newRegex,
+	"regex":          newRegex(false),
+	"not_regex":      newRegex(true),
 	"max_length":     newMaxLength,
 	"max_latency_ms": newMaxLatency,
 }

@@ -20,10 +20,16 @@ const maxOutputExcerpt = 200
 func Table(w io.Writer, rep *runner.Report) error {
 	fmt.Fprintf(w, "Suite: %s\n\n", rep.Suite)
 
+	if len(rep.Results) == 0 {
+		fmt.Fprintln(w, "No results.")
+		_, err := fmt.Fprintf(w, "\n%s  %s in %s\n", verdict(rep), rep.Suite, rep.Duration.Round(time.Millisecond))
+		return err
+	}
+
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "CASE\tMODEL\tSAMPLE\tRESULT\tLATENCY")
 	for _, r := range rep.Results {
-		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\n", r.Case, r.Model, r.Sample, status(r), r.Latency.Round(time.Millisecond))
+		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\n", r.Case, r.Model, r.Sample, status(r), latency(r))
 	}
 	if err := tw.Flush(); err != nil {
 		return err
@@ -33,20 +39,31 @@ func Table(w io.Writer, rep *runner.Report) error {
 
 	fmt.Fprintln(w)
 	tw = tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "MODEL\tPASSED\tPASS RATE\tMEAN LATENCY")
+	fmt.Fprintln(tw, "MODEL\tPASSED\tPASS RATE\tERRORS\tMEAN LATENCY")
 	for _, m := range rep.Summary() {
-		fmt.Fprintf(tw, "%s\t%d/%d\t%.0f%%\t%s\n", m.Model, m.Passed, m.Total, m.PassRate()*100, m.MeanLatency.Round(time.Millisecond))
+		latency := "-" // no request got an answer
+		if m.Errors < m.Total {
+			latency = m.MeanLatency.Round(time.Millisecond).String()
+		}
+		fmt.Fprintf(tw, "%s\t%d/%d\t%.0f%%\t%d\t%s\n", m.Model, m.Passed, m.Total, m.PassRate()*100, m.Errors, latency)
 	}
 	if err := tw.Flush(); err != nil {
 		return err
 	}
 
-	verdict := "PASS"
-	if !rep.Passed() {
-		verdict = "FAIL"
-	}
-	_, err := fmt.Fprintf(w, "\n%s  %s in %s\n", verdict, rep.Suite, rep.Duration.Round(time.Millisecond))
+	_, err := fmt.Fprintf(w, "\n%s  %s in %s\n", verdict(rep), rep.Suite, rep.Duration.Round(time.Millisecond))
 	return err
+}
+
+func verdict(rep *runner.Report) string {
+	switch {
+	case rep.Interrupted:
+		return "INTERRUPTED"
+	case rep.Passed():
+		return "PASS"
+	default:
+		return "FAIL"
+	}
 }
 
 func writeFailures(w io.Writer, rep *runner.Report) {
@@ -82,6 +99,15 @@ func status(r runner.Result) string {
 	default:
 		return "FAIL"
 	}
+}
+
+// latency is "-" for a request that got no answer: its zero latency
+// would read as an instant reply.
+func latency(r runner.Result) string {
+	if r.Error != "" {
+		return "-"
+	}
+	return r.Latency.Round(time.Millisecond).String()
 }
 
 func excerpt(s string) string {
