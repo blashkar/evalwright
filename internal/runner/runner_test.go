@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"strconv"
 	"strings"
@@ -279,7 +280,9 @@ func (p *lifecycleProvider) Warm(ctx context.Context, model string, options map[
 
 func (p *lifecycleProvider) Generate(ctx context.Context, req provider.Request) (provider.Response, error) {
 	p.generations++
-	return p.Mock.Generate(ctx, req)
+	resp, err := p.Mock.Generate(ctx, req)
+	resp.Metrics = provider.Metrics{OutputTokens: 7}
+	return resp, err
 }
 
 func TestRunPreparesAllModelsFirstThenWarmsEach(t *testing.T) {
@@ -458,7 +461,7 @@ func TestRunWithoutSeedSendsNone(t *testing.T) {
 	}
 }
 
-func TestSummaryLatencyIgnoresErrors(t *testing.T) {
+func TestSummaryTimingsIgnoreErrors(t *testing.T) {
 	rep := &Report{Results: []Result{
 		{Model: "m", Latency: 100 * time.Millisecond, Pass: true},
 		{Model: "m", Latency: 300 * time.Millisecond},
@@ -466,10 +469,76 @@ func TestSummaryLatencyIgnoresErrors(t *testing.T) {
 		{Model: "down", Error: "connection refused"},
 	}}
 	sum := rep.Summary()
-	if m := sum[0]; m.MeanLatency != 200*time.Millisecond || m.Errors != 1 || m.Total != 3 {
-		t.Errorf("summary = %+v, want mean 200ms over the 2 answered requests and 1 error", m)
+	if m := sum[0]; m.LatencyP50 != 100*time.Millisecond || m.LatencyP95 != 300*time.Millisecond || m.Errors != 1 || m.Total != 3 || m.Answered() != 2 {
+		t.Errorf("summary = %+v, want p50 100ms and p95 300ms over the 2 answered requests, and 1 error", m)
 	}
-	if d := sum[1]; d.MeanLatency != 0 || d.Errors != 1 {
+	if d := sum[1]; d.LatencyP50 != 0 || d.Errors != 1 || d.Answered() != 0 {
 		t.Errorf("summary for a model with no answers = %+v", d)
+	}
+}
+
+func TestSummarySpeedMetrics(t *testing.T) {
+	ms := time.Millisecond
+	rep := &Report{
+		Loads: []ModelLoad{{Model: "m", Time: 2 * time.Second}},
+		Results: []Result{
+			{Model: "m", Metrics: provider.Metrics{TimeToFirstToken: 30 * ms, OutputTokens: 10, GenerationDuration: 100 * ms}},
+			{Model: "m", Metrics: provider.Metrics{TimeToFirstToken: 10 * ms, OutputTokens: 90, GenerationDuration: 900 * ms}},
+			{Model: "m", Metrics: provider.Metrics{TimeToFirstToken: 20 * ms, OutputTokens: 40, GenerationDuration: 200 * ms}},
+			{Model: "m", Error: "timed out", Metrics: provider.Metrics{OutputTokens: 999, GenerationDuration: ms}},
+			{Model: "mock"}, // a provider that reports no metrics
+		},
+	}
+	sum := rep.Summary()
+	m := sum[0]
+	if m.FirstTokenP50 != 20*ms || m.OutputTokensP50 != 40 {
+		t.Errorf("FirstTokenP50 = %s, OutputTokensP50 = %d; want 20ms and 40", m.FirstTokenP50, m.OutputTokensP50)
+	}
+	// 140 tokens in 1.2s overall. Averaging the per-request rates (100, 100
+	// and 200 tokens/s) would let the short answer count as much as the long one.
+	if math.Abs(m.TokensPerSecond-140/1.2) > 0.01 {
+		t.Errorf("TokensPerSecond = %v, want %v", m.TokensPerSecond, 140/1.2)
+	}
+	if !m.Loaded || m.Load != 2*time.Second {
+		t.Errorf("Load = %s, %v; want 2s", m.Load, m.Loaded)
+	}
+	if u := sum[1]; u.FirstTokenP50 != 0 || u.OutputTokensP50 != 0 || u.TokensPerSecond != 0 || u.Loaded {
+		t.Errorf("unmeasured metrics should stay zero: %+v", u)
+	}
+}
+
+func TestCaseSummaries(t *testing.T) {
+	rep := &Report{Results: []Result{
+		{Case: "a", Model: "x", Pass: true},
+		{Case: "a", Model: "x"},
+		{Case: "b", Model: "x", Pass: true},
+		{Case: "a", Model: "y", Pass: true},
+	}}
+	got := rep.CaseSummaries()
+	if len(got) != 2 || got[0].Case != "a" || got[1].Case != "b" {
+		t.Fatalf("cases = %+v, want a then b", got)
+	}
+	if got[0].Passed["x"] != 1 || got[0].Total["x"] != 2 || got[0].Passed["y"] != 1 || got[0].Total["y"] != 1 {
+		t.Errorf("case a = %+v", got[0])
+	}
+	if got[1].Total["y"] != 0 {
+		t.Errorf("case b has no results for y, got %+v", got[1])
+	}
+}
+
+func TestRunRecordsMetricsAndLoadTime(t *testing.T) {
+	p := &lifecycleProvider{}
+	r := Runner{Providers: provider.Registry{"x": p, "mock": &provider.Mock{}}}
+	s := mustParse(t, "name: s\nmodels: [x:a, mock:b]\nprompt: hi\ncases: [{assert: [{contains: hi}]}]\n")
+	rep, err := r.Run(context.Background(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Only providers that load models have a load time to report.
+	if len(rep.Loads) != 1 || rep.Loads[0].Model != "x:a" {
+		t.Errorf("Loads = %+v, want one load, for x:a", rep.Loads)
+	}
+	if got := rep.Results[0].Metrics; got.OutputTokens != 7 {
+		t.Errorf("result metrics = %+v, want the provider's metrics", got)
 	}
 }

@@ -30,10 +30,12 @@ type Result struct {
 	Latency time.Duration `json:"latency_ns"`
 	// Seed is the seed this sample was generated with, if the suite sets one,
 	// so a surprising answer can be reproduced exactly.
-	Seed   *int64        `json:"seed,omitempty"`
-	Error  string        `json:"error,omitempty"`
-	Checks []CheckResult `json:"checks,omitempty"`
-	Pass   bool          `json:"pass"`
+	Seed *int64 `json:"seed,omitempty"`
+	// Metrics are token counts and timings, for providers that report them.
+	Metrics provider.Metrics `json:"metrics"`
+	Error   string           `json:"error,omitempty"`
+	Checks  []CheckResult    `json:"checks,omitempty"`
+	Pass    bool             `json:"pass"`
 }
 
 // Report holds every result from one suite run.
@@ -42,8 +44,18 @@ type Report struct {
 	Started  time.Time     `json:"started"`
 	Duration time.Duration `json:"duration_ns"`
 	// Interrupted is set when the run was cancelled before every case ran.
-	Interrupted bool     `json:"interrupted,omitempty"`
-	Results     []Result `json:"results"`
+	Interrupted bool `json:"interrupted,omitempty"`
+	// Loads records how long each model took to load before its cases ran,
+	// for providers that load models.
+	Loads   []ModelLoad `json:"loads,omitempty"`
+	Results []Result    `json:"results"`
+}
+
+// ModelLoad is the time it took to load one model into memory. It is close
+// to zero if the model was already loaded.
+type ModelLoad struct {
+	Model string        `json:"model"`
+	Time  time.Duration `json:"time_ns"`
 }
 
 // Runner runs suites using the providers in its registry.
@@ -107,7 +119,10 @@ func (r *Runner) Run(ctx context.Context, s *suite.Suite) (*Report, error) {
 		if r.OnModel != nil {
 			r.OnModel(t.spec)
 		}
-		results, err := r.runModel(ctx, t, s, cases)
+		results, load, err := r.runModel(ctx, t, s, cases)
+		if load != nil {
+			rep.Loads = append(rep.Loads, *load)
+		}
 		rep.Results = append(rep.Results, results...)
 		if err != nil {
 			rep.Interrupted = true
@@ -187,8 +202,9 @@ func (r *Runner) compile(s *suite.Suite) ([]target, []preparedCase, error) {
 }
 
 // runModel runs every case and sample against one model, up to r.Parallel at
-// a time, and returns the finished results in suite order.
-func (r *Runner) runModel(ctx context.Context, t target, s *suite.Suite, cases []preparedCase) ([]Result, error) {
+// a time, and returns the finished results in suite order, and how long the
+// model took to load if its provider loads models.
+func (r *Runner) runModel(ctx context.Context, t target, s *suite.Suite, cases []preparedCase) ([]Result, *ModelLoad, error) {
 	var jobs []job
 	for i := range cases {
 		for n := range s.Samples {
@@ -196,18 +212,16 @@ func (r *Runner) runModel(ctx context.Context, t target, s *suite.Suite, cases [
 		}
 	}
 
-	if err := r.warm(ctx, t, s); err != nil {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
+	var load *ModelLoad
+	if _, ok := t.p.(provider.Warmer); ok {
+		start := time.Now()
+		if err := r.warm(ctx, t, s); err != nil {
+			if ctx.Err() != nil {
+				return nil, nil, ctx.Err()
+			}
+			return r.failAll(t, jobs, "loading model: "+err.Error()), nil, nil
 		}
-		// A model that can't load (e.g. not enough memory) fails all of
-		// its cases, but the other models in the suite still run.
-		out := make([]Result, len(jobs))
-		for i, j := range jobs {
-			out[i] = Result{Case: j.c.Name, Model: t.spec, Sample: j.sample, Error: "loading model: " + err.Error()}
-			r.report(out[i])
-		}
-		return out, nil
+		load = &ModelLoad{Model: t.spec, Time: time.Since(start)}
 	}
 
 	// Each goroutine writes only its own index, so the slices need no lock,
@@ -246,17 +260,25 @@ func (r *Runner) runModel(ctx context.Context, t target, s *suite.Suite, cases [
 			out = append(out, results[i])
 		}
 	}
-	return out, ctx.Err()
+	return out, load, ctx.Err()
 }
 
-// warm loads t's model, if its provider supports that, so the load time
-// isn't counted as the first case's latency. It has the same time limit as
-// a request, so a model that never finishes loading can't hang the run.
-func (r *Runner) warm(ctx context.Context, t target, s *suite.Suite) error {
-	w, ok := t.p.(provider.Warmer)
-	if !ok {
-		return nil
+// failAll fails every job with msg. A model that can't load (e.g. not enough
+// memory) fails all of its cases, but the other models in the suite still run.
+func (r *Runner) failAll(t target, jobs []job, msg string) []Result {
+	out := make([]Result, len(jobs))
+	for i, j := range jobs {
+		out[i] = Result{Case: j.c.Name, Model: t.spec, Sample: j.sample, Error: msg}
+		r.report(out[i])
 	}
+	return out
+}
+
+// warm loads t's model, so the load time isn't counted as the first case's
+// latency. It has the same time limit as a request, so a model that never
+// finishes loading can't hang the run. t's provider must be a Warmer.
+func (r *Runner) warm(ctx context.Context, t target, s *suite.Suite) error {
+	w := t.p.(provider.Warmer)
 	if r.CaseTimeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, r.CaseTimeout)
@@ -306,6 +328,7 @@ func (r *Runner) runOne(ctx context.Context, t target, s *suite.Suite, j job) Re
 	}
 	res.Output = resp.Text
 	res.Latency = resp.Latency
+	res.Metrics = resp.Metrics
 
 	out := assert.Output{Text: resp.Text, Latency: resp.Latency}
 	res.Pass = true

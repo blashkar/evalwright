@@ -24,6 +24,32 @@ type Request struct {
 type Response struct {
 	Text    string
 	Latency time.Duration
+	// Metrics are the provider's measurements of the request. Fields a
+	// provider can't measure are left at zero.
+	Metrics Metrics
+}
+
+// Metrics describe how a model spent its time on one request.
+type Metrics struct {
+	// TimeToFirstToken is measured by the client, from sending the request
+	// to receiving the first generated token. It is what a user waits
+	// before text starts to appear.
+	TimeToFirstToken time.Duration `json:"time_to_first_token_ns,omitempty"`
+	// PromptTokens and PromptDuration cover reading the input. A prompt the
+	// server has cached is processed much faster than a new one.
+	PromptTokens   int           `json:"prompt_tokens,omitempty"`
+	PromptDuration time.Duration `json:"prompt_ns,omitempty"`
+	// OutputTokens and GenerationDuration cover writing the answer.
+	OutputTokens       int           `json:"output_tokens,omitempty"`
+	GenerationDuration time.Duration `json:"generation_ns,omitempty"`
+}
+
+// TokensPerSecond is the generation speed, or 0 if it wasn't measured.
+func (m Metrics) TokensPerSecond() float64 {
+	if m.OutputTokens == 0 || m.GenerationDuration <= 0 {
+		return 0
+	}
+	return float64(m.OutputTokens) / m.GenerationDuration.Seconds()
 }
 
 // Provider generates text from a model. Implementations must honor ctx

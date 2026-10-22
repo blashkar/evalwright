@@ -36,15 +36,25 @@ func (o *Ollama) Generate(ctx context.Context, req Request) (Response, error) {
 
 	start := time.Now()
 	var text strings.Builder
+	var m Metrics
 	err := o.Client.Chat(ctx, ollama.ChatRequest{Model: req.Model, Messages: msgs, Options: req.Options},
 		func(r ollama.ChatResponse) error {
+			// A thinking model's first tokens are its reasoning, which also
+			// keeps the user waiting, so either kind counts as the first token.
+			if m.TimeToFirstToken == 0 && (r.Message.Content != "" || r.Message.Thinking != "") {
+				m.TimeToFirstToken = time.Since(start)
+			}
 			text.WriteString(r.Message.Content)
+			if r.Done {
+				m.PromptTokens, m.PromptDuration = r.PromptEvalCount, r.PromptEvalDuration
+				m.OutputTokens, m.GenerationDuration = r.EvalCount, r.EvalDuration
+			}
 			return nil
 		})
 	if err != nil {
 		return Response{}, err
 	}
-	return Response{Text: text.String(), Latency: time.Since(start)}, nil
+	return Response{Text: text.String(), Latency: time.Since(start), Metrics: m}, nil
 }
 
 // Prepare implements Preparer. It checks that model is installed and, if

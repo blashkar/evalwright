@@ -51,6 +51,12 @@ func TestOllamaIntegration(t *testing.T) {
 	if !strings.Contains(strings.ToLower(resp.Text), "pong") {
 		t.Errorf("response %q does not contain pong", resp.Text)
 	}
+	m := resp.Metrics
+	t.Logf("metrics: first token %s, %d prompt tokens, %d output tokens, %.0f tokens/s",
+		m.TimeToFirstToken, m.PromptTokens, m.OutputTokens, m.TokensPerSecond())
+	if m.TimeToFirstToken <= 0 || m.TimeToFirstToken > resp.Latency || m.PromptTokens == 0 || m.OutputTokens == 0 || m.TokensPerSecond() <= 0 {
+		t.Errorf("metrics missing or inconsistent: %+v (latency %s)", m, resp.Latency)
+	}
 
 	// AutoPull is on, so the pull itself must fail for a model that doesn't exist.
 	if err := o.Prepare(ctx, "evalwright-no-such-model:0b"); err == nil {
