@@ -113,12 +113,16 @@ func TestPairedDiff(t *testing.T) {
 		// The real llama3.2 vs qwen3 run: same 21/25 total, opposite strengths.
 		// Differences .6, 0, 0, -.4, -.2: sd .374, t(4) = 2.776.
 		{"equal totals", five(4, 5, 5, 3, 4), five(1, 5, 5, 5, 5), 0, -0.4646, 0.4646, false},
-		// Every case 5/5 vs 4/5: the differences don't vary, but each 4/5 is
+		// Every case 5/5 vs 4/5: the differences don't vary, but each rate is
 		// itself uncertain, so the interval isn't zero-width.
-		{"constant difference", five(5, 5, 5, 5, 5), five(4, 4, 4, 4, 4), 0.2, -0.0221, 0.4221, false},
-		// Differences 1, .8, 1, 1, .8, 1: sd .103, t(5) = 2.571.
-		{"clearly better", five(5, 5, 5, 5, 5, 5), five(0, 1, 0, 0, 1, 0), 1 - 2.0/30, 0.8249, 1, true},
-		{"identical", five(5, 0, 5), five(5, 0, 5), 0, 0, 0, false},
+		{"constant difference", five(5, 5, 5, 5, 5), five(4, 4, 4, 4, 4), 0.2, -0.0682, 0.4682, false},
+		// Differences 1, .8, 1, 1, .8, 1 vary less (sd .103) than the rates
+		// themselves could, so the within-case noise sets the width; t(5) = 2.571.
+		{"clearly better", five(5, 5, 5, 5, 5, 5), five(0, 1, 0, 0, 1, 0), 1 - 2.0/30, 0.7264, 1, true},
+		// 5/5 and 0/5 have no measured variance, but 5 samples don't pin a
+		// rate down exactly, so even identical results get an interval.
+		{"identical", five(5, 0, 5), five(5, 0, 5), 0, -0.4646, 0.4646, false},
+		{"one case", five(5), five(0), 1, 0.6334, 1, true},
 	}
 	for _, tt := range tests {
 		d := PairedDiff(tt.a, tt.b)

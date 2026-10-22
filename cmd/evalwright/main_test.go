@@ -123,7 +123,7 @@ func TestRunRejectsBadParallel(t *testing.T) {
 }
 
 func TestRunModelsOverridesSuite(t *testing.T) {
-	stdout, stderr, err := execute(t, "run", "../../examples/offline.yaml", "--models", "mock:first,mock:second")
+	stdout, stderr, err := execute(t, "run", "../../examples/offline.yaml", "--models", "mock:first, mock:second")
 	if err != nil {
 		t.Fatalf("run: %v\n%s", err, stdout)
 	}
@@ -136,7 +136,7 @@ func TestRunModelsOverridesSuite(t *testing.T) {
 }
 
 func TestRunModelsRejectsBadList(t *testing.T) {
-	for _, list := range []string{"mock:a,mock:a", "mock:a,,mock:b"} {
+	for _, list := range []string{"mock:a,mock:a", "mock:a, mock:a", "mock:a,,mock:b", "mock:a, ,mock:b", "", " "} {
 		_, _, err := execute(t, "run", "../../examples/offline.yaml", "--models", list)
 		if err == nil || !strings.Contains(err.Error(), "--models") {
 			t.Errorf("--models %s: error = %v, want a --models error", list, err)

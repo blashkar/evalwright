@@ -134,7 +134,7 @@ func writeComparison(w io.Writer, comps []runner.Comparison) {
 		case d.Significant():
 			fmt.Fprintf(w, "  %s passes less often: %s points (95%% interval %s to %s).\n",
 				c.Model, points(d.Mean), points(d.Lo), points(d.Hi))
-		case d.Lo == 0 && d.Hi == 0:
+		case c.Same:
 			fmt.Fprintf(w, "  %s: same pass count on every case.\n", c.Model)
 		default:
 			fmt.Fprintf(w, "  %s: no significant difference (%s points, 95%% interval %s to %s).\n",

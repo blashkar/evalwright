@@ -174,6 +174,8 @@ type Comparison struct {
 	// exact test, corrected for the number of cases (Holm), so that with
 	// many cases a chance difference isn't reported as a real one.
 	Better, Worse []CaseDiff
+	// Same is set if both models had the same pass count on every case.
+	Same bool
 }
 
 // CaseDiff is a significant difference on one case.
@@ -202,7 +204,7 @@ func (r *Report) Compare() []Comparison {
 
 	var out []Comparison
 	for _, m := range summary[1:] {
-		comp := Comparison{Model: m.Model, Reference: ref}
+		comp := Comparison{Model: m.Model, Reference: ref, Same: true}
 		var mine, theirs []stats.Tally
 		var names []string
 		var ps []float64
@@ -213,6 +215,7 @@ func (r *Report) Compare() []Comparison {
 				continue // not run by both, e.g. interrupted
 			}
 			mine, theirs, names = append(mine, a), append(theirs, b), append(names, c.Case)
+			comp.Same = comp.Same && a == b
 			p, _ := stats.FisherExact(a, b)
 			ps = append(ps, p)
 		}

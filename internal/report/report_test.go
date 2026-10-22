@@ -152,7 +152,7 @@ func TestTablePerCaseAndComparison(t *testing.T) {
 			name:  "clearly better",
 			aPass: []int{0, 1, 0, 0, 1, 0}, bPass: []int{5, 5, 5, 5, 5, 5},
 			want: []string{
-				"b passes more often: +93 points (95% interval +82 to +100).",
+				"b passes more often: +93 points (95% interval +73 to +100).",
 				"better on c1: 5/5 vs 0/5 (p = 0.048)",
 				"better on c6: 5/5 vs 0/5 (p = 0.048)",
 			},

@@ -146,7 +146,10 @@ func (d Diff) Significant() bool {
 // difference with fewer cases than comparing the two overall rates would.
 // The interval uses Student's t distribution over the cases. It is never
 // narrower than the sampling noise within the cases, so a run in which every
-// difference happens to be the same doesn't report false certainty.
+// difference happens to be the same doesn't report false certainty. That
+// noise is estimated as if each model had one more pass and one more failure
+// on each case (Agresti and Caffo's adjustment): a case passed 5/5 has a
+// measured variance of zero, but 5 passes don't prove a 100% pass rate.
 func PairedDiff(a, b []Tally) Diff {
 	k := min(len(a), len(b))
 	if k == 0 {
@@ -158,7 +161,7 @@ func PairedDiff(a, b []Tally) Diff {
 		pa, pb := a[i].Rate(), b[i].Rate()
 		d[i] = pa - pb
 		mean += d[i]
-		within += sampleVariance(pa, a[i].Total) + sampleVariance(pb, b[i].Total)
+		within += sampleVariance(a[i]) + sampleVariance(b[i])
 	}
 	n := float64(k)
 	mean /= n
@@ -181,12 +184,15 @@ func PairedDiff(a, b []Tally) Diff {
 	}
 }
 
-// sampleVariance is the variance of a pass rate p measured over n samples.
-func sampleVariance(p float64, n int) float64 {
-	if n == 0 {
+// sampleVariance is the variance of t's pass rate, with one pass and one
+// failure added so that it isn't zero for a rate of 0% or 100%.
+func sampleVariance(t Tally) float64 {
+	if t.Total == 0 {
 		return 0
 	}
-	return p * (1 - p) / float64(n)
+	n := float64(t.Total + 2)
+	p := float64(t.Passed+1) / n
+	return p * (1 - p) / n
 }
 
 // tTable holds the two-sided 95% critical values of Student's t

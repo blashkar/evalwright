@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -37,6 +38,10 @@ func newRunCmd() *cobra.Command {
   evalwright run suite.yaml --models ollama:llama3.2:3b,ollama:qwen2.5:7b`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if cmd.Flags().Changed("models") && len(opts.models) == 0 {
+				// Otherwise --models "" would quietly run the suite's models.
+				return errors.New("--models is empty")
+			}
 			return runSuites(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), args, opts)
 		},
 	}
@@ -57,7 +62,8 @@ func runSuites(ctx context.Context, out, errOut io.Writer, paths []string, opts 
 	if opts.parallel < 1 {
 		return fmt.Errorf("--parallel must be at least 1, got %d", opts.parallel)
 	}
-	if err := checkModels(opts.models); err != nil {
+	models, err := cleanModels(opts.models)
+	if err != nil {
 		return err
 	}
 	progress := errOut
@@ -95,8 +101,8 @@ func runSuites(ctx context.Context, out, errOut io.Writer, paths []string, opts 
 			loadErrs = append(loadErrs, err)
 			continue
 		}
-		if len(opts.models) > 0 {
-			s.Models = opts.models
+		if len(models) > 0 {
+			s.Models = models
 		}
 		if err := r.Check(s); err != nil {
 			loadErrs = append(loadErrs, fmt.Errorf("%s: %w", path, err))
@@ -150,20 +156,24 @@ func runSuites(ctx context.Context, out, errOut io.Writer, paths []string, opts 
 	return nil
 }
 
-// checkModels rejects a --models list with an empty or repeated entry, the
-// same mistakes a suite's model list is checked for.
-func checkModels(models []string) error {
+// cleanModels trims spaces from a --models list, so "a, b" works, and
+// rejects an empty or repeated entry, the same mistakes a suite's model list
+// is checked for.
+func cleanModels(models []string) ([]string, error) {
+	out := make([]string, 0, len(models))
 	seen := map[string]bool{}
 	for _, m := range models {
+		m = strings.TrimSpace(m)
 		switch {
 		case m == "":
-			return errors.New("--models has an empty entry")
+			return nil, errors.New("--models has an empty entry")
 		case seen[m]:
-			return fmt.Errorf("--models lists %q twice", m)
+			return nil, fmt.Errorf("--models lists %q twice", m)
 		}
 		seen[m] = true
+		out = append(out, m)
 	}
-	return nil
+	return out, nil
 }
 
 // newProviders returns every provider a suite can use. Creating them makes no
