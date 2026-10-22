@@ -2,11 +2,10 @@
 package report
 
 import (
-	"cmp"
 	"encoding/json"
 	"fmt"
 	"io"
-	"slices"
+	"math"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -14,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/blashkar/evalwright/internal/runner"
+	"github.com/blashkar/evalwright/internal/stats"
 )
 
 // maxOutputExcerpt limits how much model output is shown for a failure.
@@ -48,6 +48,7 @@ func Table(w io.Writer, rep *runner.Report) error {
 	if err := writeQuality(w, summary); err != nil {
 		return err
 	}
+	writeComparison(w, rep.Compare())
 	if err := writeSpeed(w, summary); err != nil {
 		return err
 	}
@@ -81,10 +82,17 @@ func writeCases(w io.Writer, rep *runner.Report, summary []runner.ModelSummary) 
 	for _, c := range cases {
 		fmt.Fprint(tw, c.Case)
 		for _, m := range summary {
-			if n := c.Total[m.Model]; n > 0 {
-				fmt.Fprintf(tw, "\t%d/%d", c.Passed[m.Model], n)
-			} else {
+			t, ok := c.Tally(m.Model)
+			switch {
+			case !ok:
 				fmt.Fprint(tw, "\t-") // not run, e.g. interrupted
+			case repeated:
+				// Samples of one case are what this interval is about, so
+				// plain Wilson is right here.
+				lo, hi := stats.Wilson(t.Passed, t.Total)
+				fmt.Fprintf(tw, "\t%d/%d (%s)", t.Passed, t.Total, percentRange(lo, hi))
+			default:
+				fmt.Fprintf(tw, "\t%d/%d", t.Passed, t.Total)
 			}
 		}
 		fmt.Fprintln(tw)
@@ -97,39 +105,75 @@ func writeQuality(w io.Writer, summary []runner.ModelSummary) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "MODEL\tPASSED\tPASS RATE\t95% INTERVAL\tERRORS")
 	for _, m := range summary {
-		lo, hi := m.Interval()
-		fmt.Fprintf(tw, "%s\t%d/%d\t%.0f%%\t%.0f–%.0f%%\t%d\n",
-			m.Model, m.Passed, m.Total, m.PassRate()*100, lo*100, hi*100, m.Errors)
+		fmt.Fprintf(tw, "%s\t%d/%d\t%.0f%%\t%s\t%d\n",
+			m.Model, m.Passed, m.Total, m.PassRate()*100, percentRange(m.Interval()), m.Errors)
 	}
-	if err := tw.Flush(); err != nil {
-		return err
-	}
-	if note := compareNote(summary); note != "" {
-		fmt.Fprintln(w, note)
-	}
-	return nil
+	return tw.Flush()
 }
 
-// compareNote says whether the best model's pass rate is clearly better
-// than the runner-up's, judged by whether their 95% intervals overlap.
-// Overlapping intervals don't prove the models are equal, only that this
-// run can't tell them apart.
-func compareNote(summary []runner.ModelSummary) string {
-	if len(summary) < 2 {
-		return ""
+// minCases is the fewest cases for which a comparison says something about
+// the task in general rather than only about the cases in the suite.
+const minCases = 10
+
+// writeComparison says how each model did against the first one, case by
+// case, and which differences are real rather than noise.
+func writeComparison(w io.Writer, comps []runner.Comparison) {
+	if len(comps) == 0 {
+		return
 	}
-	ranked := slices.Clone(summary)
-	slices.SortStableFunc(ranked, func(a, b runner.ModelSummary) int {
-		return cmp.Compare(b.PassRate(), a.PassRate())
-	})
-	best, next := ranked[0], ranked[1]
-	bestLo, _ := best.Interval()
-	_, nextHi := next.Interval()
-	if bestLo > nextHi {
-		return fmt.Sprintf("%s passes more often than %s, beyond the 95%% intervals.", best.Model, next.Model)
+	fmt.Fprintf(w, "\nCompared with %s (the first model), case by case:\n", comps[0].Reference)
+	for _, c := range comps {
+		d := c.Diff
+		switch {
+		case d.Cases == 0:
+			fmt.Fprintf(w, "  %s: no cases in common.\n", c.Model)
+			continue
+		case d.Significant() && d.Mean > 0:
+			fmt.Fprintf(w, "  %s passes more often: %s points (95%% interval %s to %s).\n",
+				c.Model, points(d.Mean), points(d.Lo), points(d.Hi))
+		case d.Significant():
+			fmt.Fprintf(w, "  %s passes less often: %s points (95%% interval %s to %s).\n",
+				c.Model, points(d.Mean), points(d.Lo), points(d.Hi))
+		case c.Same:
+			fmt.Fprintf(w, "  %s: same pass count on every case.\n", c.Model)
+		default:
+			fmt.Fprintf(w, "  %s: no significant difference (%s points, 95%% interval %s to %s).\n",
+				c.Model, points(d.Mean), points(d.Lo), points(d.Hi))
+		}
+		writeCaseDiffs(w, "better", c.Better)
+		writeCaseDiffs(w, "worse", c.Worse)
 	}
-	return fmt.Sprintf("The 95%% intervals of %s and %s overlap: this run can't tell their pass rates apart. More samples narrow the intervals.",
-		best.Model, next.Model)
+
+	if n := comps[0].Diff.Cases; n < minCases {
+		fmt.Fprintf(w, "  Only %d cases: this describes these cases, not the task in general. More cases (%d or more), not more samples, make a general comparison possible.\n",
+			n, minCases)
+	}
+}
+
+func writeCaseDiffs(w io.Writer, label string, diffs []runner.CaseDiff) {
+	for _, d := range diffs {
+		fmt.Fprintf(w, "    %s on %s: %d/%d vs %d/%d (p = %.3f)\n", label, d.Case,
+			d.Model.Passed, d.Model.Total, d.Reference.Passed, d.Reference.Total, d.P)
+	}
+}
+
+// points formats a difference in pass rates as signed percentage points.
+// A difference that rounds to 0 but isn't 0 keeps one decimal, so an
+// interval that only just excludes zero doesn't read as "0 to +38".
+func points(x float64) string {
+	p := x * 100
+	switch {
+	case math.Abs(p) < 0.05:
+		return "0"
+	case math.Abs(p) < 0.5:
+		return fmt.Sprintf("%+.1f", p)
+	default:
+		return fmt.Sprintf("%+.0f", p)
+	}
+}
+
+func percentRange(lo, hi float64) string {
+	return fmt.Sprintf("%.0f–%.0f%%", lo*100, hi*100)
 }
 
 func writeSpeed(w io.Writer, summary []runner.ModelSummary) error {

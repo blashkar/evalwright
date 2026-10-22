@@ -33,6 +33,9 @@ type ModelSummary struct {
 	// Loaded is set. It is close to zero if the model was already in memory.
 	Load   time.Duration
 	Loaded bool
+
+	// cases holds the pass counts of each case, in suite order.
+	cases []stats.Tally
 }
 
 // PassRate returns the fraction of results that passed, between 0 and 1.
@@ -44,10 +47,11 @@ func (m ModelSummary) PassRate() float64 {
 }
 
 // Interval returns the 95% confidence interval for the pass rate: the
-// range the model's true pass rate is likely in, given how few samples
-// the run had.
+// range the model's true pass rate is likely in, given how many cases and
+// samples the run had. Samples of one case count for less when they tend to
+// agree with each other (see stats.ClusteredWilson).
 func (m ModelSummary) Interval() (lo, hi float64) {
-	return stats.Wilson(m.Passed, m.Total)
+	return stats.ClusteredWilson(m.cases)
 }
 
 // Answered is the number of requests that got an answer.
@@ -107,6 +111,13 @@ func (r *Report) Summary() []ModelSummary {
 			out[i].TokensPerSecond = float64(t.tokens) / t.generation.Seconds()
 		}
 	}
+	for _, c := range r.CaseSummaries() {
+		for i := range out {
+			if t, ok := c.Tally(out[i].Model); ok {
+				out[i].cases = append(out[i].cases, t)
+			}
+		}
+	}
 	for _, l := range r.Loads {
 		if i, ok := index[l.Model]; ok {
 			out[i].Load, out[i].Loaded = l.Time, true
@@ -120,6 +131,13 @@ type CaseSummary struct {
 	Case   string
 	Passed map[string]int // by model
 	Total  map[string]int // by model
+}
+
+// Tally returns model's pass count on the case, and false if the model
+// didn't run it.
+func (c CaseSummary) Tally(model string) (stats.Tally, bool) {
+	n, ok := c.Total[model]
+	return stats.Tally{Passed: c.Passed[model], Total: n}, ok
 }
 
 // CaseSummaries returns per-case, per-model pass counts in the order the
@@ -139,6 +157,81 @@ func (r *Report) CaseSummaries() []CaseSummary {
 		if res.Pass {
 			out[i].Passed[res.Model]++
 		}
+	}
+	return out
+}
+
+// Comparison sets one model's results against a reference model's, case by
+// case. Both models answered the same cases with the same seeds, so the
+// comparison is paired.
+type Comparison struct {
+	Model, Reference string
+	// Diff is Model's pass rate minus Reference's, averaged over the cases
+	// both ran, with its 95% interval.
+	Diff stats.Diff
+	// Better and Worse list the cases where Model passed significantly more
+	// or less often than Reference. Significance is judged with Fisher's
+	// exact test, corrected for the number of cases (Holm), so that with
+	// many cases a chance difference isn't reported as a real one.
+	Better, Worse []CaseDiff
+	// Same is set if both models had the same pass count on every case.
+	Same bool
+}
+
+// CaseDiff is a significant difference on one case.
+type CaseDiff struct {
+	Case             string
+	Model, Reference stats.Tally
+	// P is the Holm-adjusted p-value: the chance of a difference this large
+	// if the two models were equally good at the case.
+	P float64
+}
+
+// significance is the p-value below which a difference counts as real.
+const significance = 0.05
+
+// Compare compares every model with the first model in the suite, which
+// serves as the reference: typically the model in use, and the question
+// is whether another one would do as well. It returns nil for fewer than
+// two models.
+func (r *Report) Compare() []Comparison {
+	summary := r.Summary()
+	if len(summary) < 2 {
+		return nil
+	}
+	ref := summary[0].Model
+	cases := r.CaseSummaries()
+
+	var out []Comparison
+	for _, m := range summary[1:] {
+		comp := Comparison{Model: m.Model, Reference: ref, Same: true}
+		var mine, theirs []stats.Tally
+		var names []string
+		var ps []float64
+		for _, c := range cases {
+			a, okA := c.Tally(m.Model)
+			b, okB := c.Tally(ref)
+			if !okA || !okB {
+				continue // not run by both, e.g. interrupted
+			}
+			mine, theirs, names = append(mine, a), append(theirs, b), append(names, c.Case)
+			comp.Same = comp.Same && a == b
+			p, _ := stats.FisherExact(a, b)
+			ps = append(ps, p)
+		}
+		comp.Diff = stats.PairedDiff(mine, theirs)
+		for i, p := range stats.Holm(ps) {
+			if p >= significance {
+				continue
+			}
+			d := CaseDiff{Case: names[i], Model: mine[i], Reference: theirs[i], P: p}
+			if mine[i].Rate() > theirs[i].Rate() {
+				comp.Better = append(comp.Better, d)
+			} else {
+				comp.Worse = append(comp.Worse, d)
+			}
+		}
+		out = append(out, comp)
 	}
 	return out
 }

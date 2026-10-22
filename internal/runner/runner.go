@@ -45,10 +45,19 @@ type Report struct {
 	Duration time.Duration `json:"duration_ns"`
 	// Interrupted is set when the run was cancelled before every case ran.
 	Interrupted bool `json:"interrupted,omitempty"`
+	// Models records which build of each model ran, for providers that
+	// report it.
+	Models []ModelInfo `json:"models,omitempty"`
 	// Loads records how long each model took to load before its cases ran,
 	// for providers that load models.
 	Loads   []ModelLoad `json:"loads,omitempty"`
 	Results []Result    `json:"results"`
+}
+
+// ModelInfo identifies the exact build of a model the suite ran.
+type ModelInfo struct {
+	Model string `json:"model"`
+	provider.ModelInfo
 }
 
 // ModelLoad is the time it took to load one model into memory. It is close
@@ -105,12 +114,12 @@ type job struct {
 // or missing model fails in seconds instead of halfway through a long run.
 // If ctx is cancelled, Run returns the results finished so far along with ctx's error.
 func (r *Runner) Run(ctx context.Context, s *suite.Suite) (*Report, error) {
-	targets, cases, err := r.prepare(ctx, s)
+	targets, cases, models, err := r.prepare(ctx, s)
 	if err != nil {
 		return nil, err
 	}
 
-	rep := &Report{Suite: s.Name, Started: time.Now()}
+	rep := &Report{Suite: s.Name, Started: time.Now(), Models: models}
 	defer func() { rep.Duration = time.Since(rep.Started) }()
 
 	// Models are the outer loop so each local model is loaded into memory once,
@@ -141,25 +150,29 @@ func (r *Runner) Check(s *suite.Suite) error {
 	return err
 }
 
-func (r *Runner) prepare(ctx context.Context, s *suite.Suite) ([]target, []preparedCase, error) {
+func (r *Runner) prepare(ctx context.Context, s *suite.Suite) ([]target, []preparedCase, []ModelInfo, error) {
 	targets, cases, err := r.compile(s)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	// Only contact providers once the suite itself is known to be valid.
 	var errs []error
+	var models []ModelInfo
 	for _, t := range targets {
 		if p, ok := t.p.(provider.Preparer); ok {
-			if err := p.Prepare(ctx, t.model); err != nil {
+			info, err := p.Prepare(ctx, t.model)
+			if err != nil {
 				errs = append(errs, fmt.Errorf("model %q: %w", t.spec, err))
+				continue
 			}
+			models = append(models, ModelInfo{Model: t.spec, ModelInfo: info})
 		}
 	}
 	if err := errors.Join(errs...); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return targets, cases, nil
+	return targets, cases, models, nil
 }
 
 // compile resolves s's models and builds its prompts and assertions.

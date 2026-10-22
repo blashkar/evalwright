@@ -257,12 +257,12 @@ type lifecycleProvider struct {
 	generations int
 }
 
-func (p *lifecycleProvider) Prepare(_ context.Context, model string) error {
+func (p *lifecycleProvider) Prepare(_ context.Context, model string) (provider.ModelInfo, error) {
 	p.events = append(p.events, "prepare "+model)
 	if model == p.missing {
-		return errors.New("not installed")
+		return provider.ModelInfo{}, errors.New("not installed")
 	}
-	return nil
+	return provider.ModelInfo{Digest: "digest-of-" + model}, nil
 }
 
 func (p *lifecycleProvider) Warm(ctx context.Context, model string, options map[string]any) error {
@@ -291,8 +291,13 @@ func TestRunPreparesAllModelsFirstThenWarmsEach(t *testing.T) {
 	r := Runner{Providers: provider.Registry{"x": p}, OnModel: func(m string) { started = append(started, m) }}
 
 	s := mustParse(t, "name: s\nmodels: [x:a, x:b]\nprompt: hi\ncases: [{assert: [{contains: hi}]}]\n")
-	if _, err := r.Run(context.Background(), s); err != nil {
+	rep, err := r.Run(context.Background(), s)
+	if err != nil {
 		t.Fatal(err)
+	}
+	// Each model's build is recorded, so results can be traced to it.
+	if len(rep.Models) != 2 || rep.Models[0].Model != "x:a" || rep.Models[1].Digest != "digest-of-b" {
+		t.Errorf("Models = %+v", rep.Models)
 	}
 	want := []string{"prepare a", "prepare b", "warm a", "warm b"}
 	if !slices.Equal(p.events, want) {

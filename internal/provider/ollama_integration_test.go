@@ -31,8 +31,12 @@ func TestOllamaIntegration(t *testing.T) {
 	}
 
 	o := &Ollama{Client: client, AutoPull: true, Log: testLog{t}}
-	if err := o.Prepare(ctx, model); err != nil {
+	info, err := o.Prepare(ctx, model)
+	if err != nil {
 		t.Fatalf("Prepare: %v", err)
+	}
+	if info.Digest == "" || info.ParameterSize == "" {
+		t.Errorf("Prepare returned no model details: %+v", info)
 	}
 	if err := o.Warm(ctx, model, nil); err != nil {
 		t.Fatalf("Warm: %v", err)
@@ -59,7 +63,7 @@ func TestOllamaIntegration(t *testing.T) {
 	}
 
 	// AutoPull is on, so the pull itself must fail for a model that doesn't exist.
-	if err := o.Prepare(ctx, "evalwright-no-such-model:0b"); err == nil {
+	if _, err := o.Prepare(ctx, "evalwright-no-such-model:0b"); err == nil {
 		t.Error("Prepare of a nonexistent model succeeded")
 	} else {
 		t.Logf("nonexistent model: %v", err)
