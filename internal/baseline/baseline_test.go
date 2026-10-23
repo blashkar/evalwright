@@ -1,6 +1,8 @@
 package baseline
 
 import (
+	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -200,6 +202,49 @@ func TestCompareSaysWhatChanged(t *testing.T) {
 	}
 }
 
+func TestCompareTestsOnlyChangedCases(t *testing.T) {
+	// 21 cases at 5 samples. Corrected for all 21, even 5/5 falling to 0/5
+	// isn't significant (21 × 0.004 = 0.083). But only one case was edited,
+	// and the other 20 reproduced exactly, so only it is tested.
+	baseRun, nowRun := run{}, run{}
+	for i := range 21 {
+		c := fmt.Sprintf("c%02d", i)
+		baseRun[c], nowRun[c] = 5, 5
+	}
+	nowRun["c00"] = 0
+	base := baselineOf(t, report(map[string]run{"m": baseRun}, "m"))
+	now := report(map[string]run{"m": nowRun}, "m")
+	now.Cases[0].Fingerprint.Prompt = "edited"
+
+	cmp := Compare(base, now)
+	c := cmp.Cases[0]
+	if c.Case != "c00" || c.Status != Regressed || math.Abs(c.P-1/252.0) > 1e-9 {
+		t.Errorf("edited case = %s %s (p = %v), want regressed, p = 1/252", c.Case, c.Status, c.P)
+	}
+	for _, c := range cmp.Cases[1:] {
+		if c.Status != Identical {
+			t.Errorf("%s: %s, want identical", c.Case, c.Status)
+		}
+	}
+	if m := cmp.Models[0]; !m.Detectable {
+		t.Errorf("model = %+v, want detectable: one case tested", m)
+	}
+
+	// Edit every case's system prompt instead: now all 21 are tested, and
+	// the same drop is no longer significant.
+	now = report(map[string]run{"m": nowRun}, "m")
+	for i := range now.Cases {
+		now.Cases[i].Fingerprint.System = "edited"
+	}
+	cmp = Compare(base, now)
+	if c := cmp.Cases[0]; c.Status != Changed {
+		t.Errorf("edited system prompt: c00 = %s, want changed (not significant across 21 cases)", c.Status)
+	}
+	if m := cmp.Models[0]; m.Detectable || m.SamplesNeeded != 6 {
+		t.Errorf("model = %+v, want not detectable, 6 samples needed", m)
+	}
+}
+
 func TestCompareSameInputsDifferentAnswers(t *testing.T) {
 	base := baselineOf(t, report(map[string]run{"m": {"a": 5}}, "m"))
 	now := report(map[string]run{"m": {"a": 5}}, "m")
@@ -303,12 +348,16 @@ func TestFailuresLatency(t *testing.T) {
 }
 
 func TestDetectable(t *testing.T) {
-	cases := func(k, n int) []stats.Tally {
-		out := make([]stats.Tally, k)
-		for i := range out {
-			out[i] = stats.Tally{Passed: n, Total: n}
+	// k tested cases of n samples, after an identical one that isn't
+	// tested and has fewer samples, so it mustn't count.
+	cases := func(k, n int) ([]CaseResult, []int) {
+		out := []CaseResult{{Status: Identical, Now: stats.Tally{Total: 1}, Base: stats.Tally{Total: 1}}}
+		var tested []int
+		for range k {
+			tested = append(tested, len(out))
+			out = append(out, CaseResult{Status: Changed, Now: stats.Tally{Passed: n, Total: n}, Base: stats.Tally{Passed: n, Total: n}})
 		}
-		return out
+		return out, tested
 	}
 	for _, tt := range []struct {
 		k, n int
@@ -319,8 +368,9 @@ func TestDetectable(t *testing.T) {
 		{21, 5, false, 6},  // 21 × 0.004 = 0.083; 21 × 0.0011 = 0.023
 		{21, 10, true, 0},  // 21 × 0.0000054
 		{200, 3, false, 8}, // 200/C(14,7) = 0.058, 200/C(16,8) = 0.016
+		{0, 0, true, 0},    // nothing tested
 	} {
-		ok, need := detectable(cases(tt.k, tt.n), cases(tt.k, tt.n))
+		ok, need := detectable(cases(tt.k, tt.n))
 		if ok != tt.ok || (!ok && need != tt.need) {
 			t.Errorf("%d cases × %d samples: detectable = %v, need %d; want %v, %d", tt.k, tt.n, ok, need, tt.ok, tt.need)
 		}

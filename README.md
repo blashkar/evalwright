@@ -222,14 +222,28 @@ Each case gets one of these results:
 | identical | Same inputs, checks and model build, and the same answers. With fixed seeds an unchanged case reproduces exactly, so this is the usual result. |
 | unchanged | Same pass count, though something differs (the report says what). |
 | changed | The pass count differs, but not by more than chance explains. |
-| regressed / improved | It passes significantly less or more often: a one-sided Fisher's exact test, Holm-corrected across the cases, p < 0.05. |
+| regressed / improved | It passes significantly less or more often: a one-sided Fisher's exact test, Holm-corrected across the cases that differ from the baseline, p < 0.05. |
 | new / removed | Only this run, or only the baseline, has the case. |
 
 The WHAT CHANGED column says which input differs from the baseline: system prompt, prompt, options, checks, model build or samples. "answers only" means nothing you control changed, but the model answered differently.
 
 **When the gate fails.** Exit code 1 if a case regressed, if a model's overall pass rate dropped (the paired difference's 95% interval is entirely below zero), or if the suite's `min_pass_rate` or `max_latency_increase` is broken. Failures already in the baseline, new models and new cases never fail it. Latency only fails the run when the suite sets `max_latency_increase`, because it depends on whatever else the machine is doing: the same unchanged run varied by 10–40% while another program was using Ollama.
 
-**Use enough samples.** A one-case regression can only be significant if the run is big enough. With 5 samples, 5/5 falling to 0/5 has p = 0.004, but corrected for 21 cases it becomes 0.083: no single case can ever be flagged, whatever happens to it. The report warns when this is so and says how many samples would fix it (6 for 21 cases). 10 samples is a good default for a gate. The overall check still works at 5 samples, but only catches a change that is broad, not one that breaks a few cases.
+**Only changed cases are tested.** With the same inputs, seeds and model build, a case reproduces exactly, so an identical case can't have regressed and isn't counted in the correction. If you edit one case's prompt, that case is tested on its own, and even 5/5 falling to 0/5 is caught (p = 0.004). Editing the system prompt or switching the model build changes every case, so all of them are tested.
+
+**Use enough samples.** When many cases changed, a one-case regression can only be significant if the run is big enough. With 5 samples, 5/5 falling to 0/5 has p = 0.004, but corrected for 21 cases it becomes 0.083: no single case can ever be flagged, whatever happens to it. The report warns when this is so and says how many samples would fix it (6 for 21 cases). 10 samples is a good default for a gate. The overall check still works at 5 samples, but only catches a change that is broad, not one that breaks a few cases.
+
+**Measured error rates.** [`calibration_test.go`](internal/baseline/calibration_test.go) simulates 4,000 runs per row. The true pass rates are llama3.2:3b's on the 21-case compare suite, and the system prompt counts as edited, so every case is tested (the hardest setting for the gate). It shows how often the gate fails the run:
+
+| What really happened | 5 samples | 10 samples | 20 samples |
+|---|---|---|---|
+| Nothing changed (false alarm) | 0.7% | 0.9% | 1.6% |
+| 3 cases now fail every time | 19% | 100% | 100% |
+| 1 case now fails every time | 3.5% | 100% | 100% |
+| 1 case went from 90% to 50% | 2.1% | 8.8% | 39% |
+| Every case 20 points worse | 90% | 99.6% | 100% |
+
+False alarms stay well under the 5% significance level, since Fisher's exact test errs on the cautious side. A case that breaks completely is caught every time from 10 samples. A moderate drop in one case is the gate's blind spot: it is hard to tell from noise without many more samples. The test runs in CI and fails if these rates drift outside set bounds, so a change to the statistics that makes the gate noisier or weaker is caught.
 
 ### Example: removing a fact from the system prompt
 

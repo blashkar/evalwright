@@ -110,8 +110,8 @@ func writeBaseline(w io.Writer, cmp *baseline.Comparison) error {
 				m.Model, stats.Points(d.Mean), stats.Points(d.Lo), stats.Points(d.Hi))
 		}
 		if !m.New && !m.Detectable {
-			fmt.Fprintf(w, "    Too few samples to flag a single case: with %d cases, even a case going from all samples passing to none isn't significant. Use %d or more samples per case (--samples) for the gate to catch one case getting worse.\n",
-				m.Diff.Cases, m.SamplesNeeded)
+			fmt.Fprintf(w, "    Too few samples to flag a single case: with %d cases changed, even a case going from all samples passing to none isn't significant. Use %d or more samples per case (--samples) for the gate to catch one case getting worse.\n",
+				m.Tested, m.SamplesNeeded)
 		}
 		if m.BuildChanged() {
 			fmt.Fprintf(w, "    model build changed: %s, was %s\n", short(m.Digest), short(m.BaseDigest))
