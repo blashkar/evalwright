@@ -295,6 +295,15 @@ func Points(x float64) string {
 	}
 }
 
+// PValue formats p as "p = 0.012", or "p < 0.001" when three decimals would
+// round it to zero.
+func PValue(p float64) string {
+	if p < 0.001 {
+		return "p < 0.001"
+	}
+	return fmt.Sprintf("p = %.3f", p)
+}
+
 // Percentile returns the p-th percentile (0 < p <= 100) of xs using the
 // nearest-rank method, so the result is always one of the measured values.
 // It returns the zero value if xs is empty. xs is not modified.

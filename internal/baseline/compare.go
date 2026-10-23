@@ -278,8 +278,8 @@ func Failures(rep *runner.Report, s *suite.Suite, cmp *Comparison) []string {
 
 	for _, c := range cmp.Cases {
 		if c.Status == Regressed {
-			out = append(out, fmt.Sprintf("%s regressed on %s: %d/%d, was %d/%d (p = %.3f)",
-				c.Model, c.Case, c.Now.Passed, c.Now.Total, c.Base.Passed, c.Base.Total, c.P))
+			out = append(out, fmt.Sprintf("%s regressed on %s: %d/%d, was %d/%d (%s)",
+				c.Model, c.Case, c.Now.Passed, c.Now.Total, c.Base.Passed, c.Base.Total, stats.PValue(c.P)))
 		}
 	}
 	for _, m := range cmp.Models {

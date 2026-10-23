@@ -233,26 +233,34 @@ The WHAT CHANGED column says which input differs from the baseline: system promp
 
 ### Example: removing a fact from the system prompt
 
-Using the compare suite with llama3.2:3b, after saving a baseline at 5 samples (64 of 105 passed):
+The compare suite with llama3.2:3b at 10 samples. The baseline run passed 134 of 210 (64%) and exited 1 because some cases fail; it is saved anyway, since known failures are part of the baseline. Then:
 
-- **Run again unchanged:** all 21 cases identical, exit 0.
-- **Remove "Never invent policies…" and "Always reply in the customer's language":** no significant change (+5 points, −8 to +17), exit 0. The 3B model mostly ignored those lines anyway.
-- **Remove the Returns fact:** three cases broke, but the gate passed:
+| Change | Result | Exit |
+|---|---|---|
+| None, run again | All 21 cases identical: same seeds, same answers | 0 |
+| Remove "Never invent policies…" and "Always reply in the customer's language" | No significant change (−0.5 points, −8 to +7); the 3B model mostly ignored those lines anyway | 0 |
+| Remove the Returns fact | Three cases regressed | 1 |
 
 ```
 Compared with the baseline:
-  ollama:llama3.2:3b: no significant change (-2 points, 95% interval -22 to +18).
-    Too few samples to flag a single case: with 21 cases, even a case going from all samples passing to none isn't significant. Use 6 or more samples per case (--samples) for the gate to catch one case getting worse.
+  ollama:llama3.2:3b: no significant change (-6 points, 95% interval -22 to +11).
 
-  CASE                       MODEL               RESULT     NOW  BASELINE  WHAT CHANGED
-  return-inside-window       ollama:llama3.2:3b  changed    0/5  4/5       system prompt
-  refund-time                ollama:llama3.2:3b  changed    0/5  3/5       system prompt
-  french-worn-return         ollama:llama3.2:3b  changed    5/5  0/5       system prompt
-  injection-return-window    ollama:llama3.2:3b  changed    0/5  5/5       system prompt
+  CASE                       MODEL               RESULT                 NOW    BASELINE  WHAT CHANGED
+  return-inside-window       ollama:llama3.2:3b  REGRESSED (p = 0.007)  0/10   8/10      system prompt
+  refund-time                ollama:llama3.2:3b  REGRESSED (p = 0.029)  0/10   7/10      system prompt
+  french-worn-return         ollama:llama3.2:3b  changed                8/10   2/10      system prompt
+  injection-return-window    ollama:llama3.2:3b  REGRESSED (p < 0.001)  0/10   10/10     system prompt
   ...
+
+Failed because:
+  - ollama:llama3.2:3b regressed on return-inside-window: 0/10, was 8/10 (p = 0.007)
+  - ollama:llama3.2:3b regressed on refund-time: 0/10, was 7/10 (p = 0.029)
+  - ollama:llama3.2:3b regressed on injection-return-window: 0/10, was 10/10 (p < 0.001)
 ```
 
-Without the facts, the model fails the cases that needed them. It "passes" french-worn-return because, with no policy to quote, it no longer says worn shoes can be returned. The overall rate barely moves, so only per-case tests can catch this, and at 5 samples they can't. That is what the warning is for.
+Without the facts, the model fails the cases that needed them. It "passes" french-worn-return more often because, with no policy to quote, it no longer says worn shoes can be returned. The overall rate barely moves, so only the per-case tests catch this.
+
+The same change at 5 samples passed the gate: the same cases fell to 0/5, but at that size none of them could be significant after the correction for 21 cases, and the report said so ("Too few samples to flag a single case … Use 6 or more samples per case").
 
 ## Example: comparing two local models
 

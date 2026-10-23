@@ -141,7 +141,7 @@ func writeBaseline(w io.Writer, cmp *baseline.Comparison) error {
 		for _, c := range rows {
 			result := c.Status.String()
 			if c.Status == baseline.Regressed || c.Status == baseline.Improved {
-				result = fmt.Sprintf("%s (p = %.3f)", strings.ToUpper(result), c.P)
+				result = fmt.Sprintf("%s (%s)", strings.ToUpper(result), stats.PValue(c.P))
 			}
 			fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\t%s\t%s\n", c.Case, c.Model, result,
 				fraction(c.Now, c.Status != baseline.Removed), fraction(c.Base, c.Status != baseline.New), changes(c))
@@ -281,8 +281,8 @@ func writeComparison(w io.Writer, comps []runner.Comparison) {
 
 func writeCaseDiffs(w io.Writer, label string, diffs []runner.CaseDiff) {
 	for _, d := range diffs {
-		fmt.Fprintf(w, "    %s on %s: %d/%d vs %d/%d (p = %.3f)\n", label, d.Case,
-			d.Model.Passed, d.Model.Total, d.Reference.Passed, d.Reference.Total, d.P)
+		fmt.Fprintf(w, "    %s on %s: %d/%d vs %d/%d (%s)\n", label, d.Case,
+			d.Model.Passed, d.Model.Total, d.Reference.Passed, d.Reference.Total, stats.PValue(d.P))
 	}
 }
 
