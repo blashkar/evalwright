@@ -10,6 +10,7 @@ package stats
 
 import (
 	"cmp"
+	"fmt"
 	"math"
 	"slices"
 )
@@ -277,6 +278,21 @@ func Holm(ps []float64) []float64 {
 		adjusted[i] = running
 	}
 	return adjusted
+}
+
+// Points formats a difference in pass rates as signed percentage points.
+// A difference that rounds to 0 but isn't 0 keeps one decimal, so an
+// interval that only just excludes zero doesn't read as "0 to +38".
+func Points(x float64) string {
+	p := x * 100
+	switch {
+	case math.Abs(p) < 0.05:
+		return "0"
+	case math.Abs(p) < 0.5:
+		return fmt.Sprintf("%+.1f", p)
+	default:
+		return fmt.Sprintf("%+.0f", p)
+	}
 }
 
 // Percentile returns the p-th percentile (0 < p <= 100) of xs using the

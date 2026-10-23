@@ -547,3 +547,35 @@ func TestRunRecordsMetricsAndLoadTime(t *testing.T) {
 		t.Errorf("result metrics = %+v, want the provider's metrics", got)
 	}
 }
+
+func TestRunRecordsFingerprints(t *testing.T) {
+	src := `
+name: fp
+models: [mock:echo]
+system: Be brief.
+prompt: "Capital of {{.country}}?"
+cases:
+  - {name: france, vars: {country: France}, assert: [{contains: Paris}]}
+  - {name: spain, vars: {country: Spain}, assert: [{contains: Madrid}]}
+`
+	r := Runner{Providers: provider.Registry{"mock": &provider.Mock{}}}
+	rep, err := r.Run(context.Background(), mustParse(t, src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Cases) != 2 || rep.Cases[0].Name != "france" || rep.Cases[1].Name != "spain" {
+		t.Fatalf("cases = %+v", rep.Cases)
+	}
+	if got := rep.Cases[0].Fingerprint.Changes(rep.Cases[1].Fingerprint); !slices.Equal(got, []string{"prompt", "checks"}) {
+		t.Errorf("changes between the cases = %v, want prompt and checks", got)
+	}
+
+	// The same suite gives the same fingerprints; a new system prompt changes them.
+	again, err := r.Run(context.Background(), mustParse(t, strings.Replace(src, "Be brief.", "Be kind.", 1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := again.Cases[0].Fingerprint.Changes(rep.Cases[0].Fingerprint); !slices.Equal(got, []string{"system prompt"}) {
+		t.Errorf("changes = %v, want only the system prompt", got)
+	}
+}

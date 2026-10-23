@@ -8,8 +8,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blashkar/evalwright/internal/baseline"
 	"github.com/blashkar/evalwright/internal/provider"
 	"github.com/blashkar/evalwright/internal/runner"
+	"github.com/blashkar/evalwright/internal/stats"
 )
 
 func sampleReport() *runner.Report {
@@ -32,7 +34,7 @@ func sampleReport() *runner.Report {
 
 func TestTable(t *testing.T) {
 	var buf bytes.Buffer
-	if err := Table(&buf, sampleReport()); err != nil {
+	if err := Table(&buf, sampleReport(), nil); err != nil {
 		t.Fatal(err)
 	}
 	got := buf.String()
@@ -97,7 +99,7 @@ func TestTableInterrupted(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			if err := Table(&buf, tt.rep); err != nil {
+			if err := Table(&buf, tt.rep, nil); err != nil {
 				t.Fatal(err)
 			}
 			if !strings.Contains(buf.String(), "INTERRUPTED  demo") || strings.Contains(buf.String(), "PASS  demo") {
@@ -167,7 +169,7 @@ func TestTablePerCaseAndComparison(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			if err := Table(&buf, twoModels(tt.aPass, tt.bPass)); err != nil {
+			if err := Table(&buf, twoModels(tt.aPass, tt.bPass), nil); err != nil {
 				t.Fatal(err)
 			}
 			got := buf.String()
@@ -185,14 +187,6 @@ func TestTablePerCaseAndComparison(t *testing.T) {
 	}
 }
 
-func TestPoints(t *testing.T) {
-	for x, want := range map[float64]string{0: "0", 0.0004: "0", 0.004: "+0.4", -0.003: "-0.3", 0.19: "+19", -0.464: "-46"} {
-		if got := points(x); got != want {
-			t.Errorf("points(%v) = %q, want %q", x, got, want)
-		}
-	}
-}
-
 func TestTableSpeed(t *testing.T) {
 	rep := &runner.Report{
 		Suite: "speed",
@@ -205,7 +199,7 @@ func TestTableSpeed(t *testing.T) {
 		},
 	}
 	var buf bytes.Buffer
-	if err := Table(&buf, rep); err != nil {
+	if err := Table(&buf, rep, nil); err != nil {
 		t.Fatal(err)
 	}
 	var speed [][]string
@@ -220,5 +214,66 @@ func TestTableSpeed(t *testing.T) {
 	}
 	if fmt.Sprint(speed) != fmt.Sprint(want) {
 		t.Errorf("speed rows = %v, want %v\n%s", speed, want, buf.String())
+	}
+}
+
+func TestTableBaseline(t *testing.T) {
+	rep := twoModels([]int{5, 0, 5}, []int{5, 5, 5})
+	gate := &Gate{
+		Baseline: &baseline.Comparison{
+			Suite: "cmp",
+			Models: []baseline.ModelResult{
+				{
+					Model: "a", Diff: stats.Diff{Mean: -1.0 / 3, Lo: -0.9, Hi: 0.2, Cases: 3},
+					Digest: "sha256:0123456789abcdef", BaseDigest: "sha256:fedcba9876543210",
+					LatencyP50: 120 * time.Millisecond, BaseLatencyP50: 100 * time.Millisecond,
+				},
+				{Model: "b", New: true},
+			},
+			Cases: []baseline.CaseResult{
+				{Model: "a", Case: "c1", Status: baseline.Identical, Now: stats.Tally{Passed: 5, Total: 5}, Base: stats.Tally{Passed: 5, Total: 5}},
+				{
+					Model: "a", Case: "c2", Status: baseline.Regressed, P: 0.012, Changes: []string{"prompt", "model build"},
+					Now: stats.Tally{Passed: 0, Total: 5}, Base: stats.Tally{Passed: 5, Total: 5},
+				},
+				{Model: "a", Case: "c3", Status: baseline.Unchanged, Now: stats.Tally{Passed: 5, Total: 5}, Base: stats.Tally{Passed: 5, Total: 5}},
+				{Model: "b", Case: "c1", Status: baseline.New, Now: stats.Tally{Passed: 5, Total: 5}},
+			},
+			RemovedModels: []string{"old"},
+		},
+		Failures: []string{"a regressed on c2: 0/5, was 5/5 (p = 0.012)"},
+	}
+	var buf bytes.Buffer
+	if err := Table(&buf, rep, gate); err != nil {
+		t.Fatal(err)
+	}
+	got := buf.String()
+	for _, want := range []string{
+		"Compared with the baseline:",
+		"a: no significant change (-33 points, 95% interval -90 to +20).",
+		"model build changed: 0123456789ab, was fedcba987654",
+		"median latency 120ms, was 100ms (+20%)",
+		"b: new, not in the baseline.",
+		"old: in the baseline, not run this time.",
+		"c2    a      REGRESSED (p = 0.012)  0/5  5/5       prompt, model build",
+		"c3    a      unchanged              5/5  5/5       answers only",
+		"c1    b      new                    5/5  -         -",
+		"The other 1 gave the same answers as in the baseline.",
+		"Failed because:\n  - a regressed on c2: 0/5, was 5/5 (p = 0.012)",
+		"FAIL  cmp",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q:\n%s", want, got)
+		}
+	}
+
+	// The same results pass when the gate finds nothing wrong, although
+	// model a fails a case.
+	buf.Reset()
+	if err := Table(&buf, rep, &Gate{}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "PASS  cmp") {
+		t.Errorf("want PASS:\n%s", buf.String())
 	}
 }

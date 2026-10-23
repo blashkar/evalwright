@@ -179,3 +179,11 @@ func TestHolm(t *testing.T) {
 		t.Errorf("Holm caps at 1, got %v", got)
 	}
 }
+
+func TestPoints(t *testing.T) {
+	for x, want := range map[float64]string{0: "0", 0.0004: "0", 0.004: "+0.4", -0.003: "-0.3", 0.19: "+19", -0.464: "-46"} {
+		if got := Points(x); got != want {
+			t.Errorf("Points(%v) = %q, want %q", x, got, want)
+		}
+	}
+}

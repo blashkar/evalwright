@@ -5,13 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"math"
 	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
 	"unicode/utf8"
 
+	"github.com/blashkar/evalwright/internal/baseline"
 	"github.com/blashkar/evalwright/internal/runner"
 	"github.com/blashkar/evalwright/internal/stats"
 )
@@ -19,14 +19,24 @@ import (
 // maxOutputExcerpt limits how much model output is shown for a failure.
 const maxOutputExcerpt = 200
 
+// Gate is what decides whether a run passes: the comparison with a
+// baseline, if there is one, and the reasons the run fails.
+type Gate struct {
+	Baseline *baseline.Comparison
+	// Failures are the reasons the run fails; none means it passes.
+	Failures []string
+}
+
 // Table writes a results table, the details of every failure, pass counts
-// per case, and per-model quality and speed summaries.
-func Table(w io.Writer, rep *runner.Report) error {
+// per case, per-model quality and speed summaries, and, if gate is set, the
+// comparison with the baseline and the reasons the run fails. If gate is
+// nil, the run passes only if every result passed.
+func Table(w io.Writer, rep *runner.Report, gate *Gate) error {
 	fmt.Fprintf(w, "Suite: %s\n\n", rep.Suite)
 
 	if len(rep.Results) == 0 {
 		fmt.Fprintln(w, "No results.")
-		_, err := fmt.Fprintf(w, "\n%s  %s in %s\n", verdict(rep), rep.Suite, rep.Duration.Round(time.Millisecond))
+		_, err := fmt.Fprintf(w, "\n%s  %s in %s\n", verdict(rep, gate), rep.Suite, rep.Duration.Round(time.Millisecond))
 		return err
 	}
 
@@ -52,9 +62,128 @@ func Table(w io.Writer, rep *runner.Report) error {
 	if err := writeSpeed(w, summary); err != nil {
 		return err
 	}
+	if gate != nil {
+		if err := writeBaseline(w, gate.Baseline); err != nil {
+			return err
+		}
+		if len(gate.Failures) > 0 {
+			fmt.Fprintln(w, "\nFailed because:")
+			for _, f := range gate.Failures {
+				fmt.Fprintf(w, "  - %s\n", f)
+			}
+		}
+	}
 
-	_, err := fmt.Fprintf(w, "\n%s  %s in %s\n", verdict(rep), rep.Suite, rep.Duration.Round(time.Millisecond))
+	_, err := fmt.Fprintf(w, "\n%s  %s in %s\n", verdict(rep, gate), rep.Suite, rep.Duration.Round(time.Millisecond))
 	return err
+}
+
+// writeBaseline says how the run compares with the baseline: each model's
+// overall change, and every case that didn't run exactly as before.
+func writeBaseline(w io.Writer, cmp *baseline.Comparison) error {
+	if cmp == nil {
+		return nil
+	}
+	if cmp.Missing {
+		_, err := fmt.Fprintf(w, "\nThe baseline has no results for suite %s, so every case is new.\n", cmp.Suite)
+		return err
+	}
+
+	fmt.Fprintln(w, "\nCompared with the baseline:")
+	for _, m := range cmp.Models {
+		d := m.Diff
+		switch {
+		case m.New:
+			fmt.Fprintf(w, "  %s: new, not in the baseline.\n", m.Model)
+		case d.Cases == 0:
+			fmt.Fprintf(w, "  %s: no cases in common.\n", m.Model)
+		case m.Same:
+			fmt.Fprintf(w, "  %s: same pass count on every case.\n", m.Model)
+		case d.Significant() && d.Mean > 0:
+			fmt.Fprintf(w, "  %s passes more often: %s points (95%% interval %s to %s).\n",
+				m.Model, stats.Points(d.Mean), stats.Points(d.Lo), stats.Points(d.Hi))
+		case d.Significant():
+			fmt.Fprintf(w, "  %s passes less often: %s points (95%% interval %s to %s).\n",
+				m.Model, stats.Points(d.Mean), stats.Points(d.Lo), stats.Points(d.Hi))
+		default:
+			fmt.Fprintf(w, "  %s: no significant change (%s points, 95%% interval %s to %s).\n",
+				m.Model, stats.Points(d.Mean), stats.Points(d.Lo), stats.Points(d.Hi))
+		}
+		if !m.New && !m.Detectable {
+			fmt.Fprintf(w, "    Too few samples to flag a single case: with %d cases, even a case going from all samples passing to none isn't significant. Use %d or more samples per case (--samples) for the gate to catch one case getting worse.\n",
+				m.Diff.Cases, m.SamplesNeeded)
+		}
+		if m.BuildChanged() {
+			fmt.Fprintf(w, "    model build changed: %s, was %s\n", short(m.Digest), short(m.BaseDigest))
+		}
+		if inc, ok := m.LatencyIncrease(); ok {
+			fmt.Fprintf(w, "    median latency %s, was %s (%+.0f%%)\n",
+				ms(m.LatencyP50), ms(m.BaseLatencyP50), inc*100)
+		}
+	}
+	for _, m := range cmp.RemovedModels {
+		fmt.Fprintf(w, "  %s: in the baseline, not run this time.\n", m)
+	}
+
+	identical := 0
+	var rows []baseline.CaseResult
+	for _, c := range cmp.Cases {
+		if c.Status == baseline.Identical {
+			identical++
+		} else {
+			rows = append(rows, c)
+		}
+	}
+	if len(rows) > 0 {
+		fmt.Fprintln(w)
+		tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(tw, "  CASE\tMODEL\tRESULT\tNOW\tBASELINE\tWHAT CHANGED")
+		for _, c := range rows {
+			result := c.Status.String()
+			if c.Status == baseline.Regressed || c.Status == baseline.Improved {
+				result = fmt.Sprintf("%s (p = %.3f)", strings.ToUpper(result), c.P)
+			}
+			fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\t%s\t%s\n", c.Case, c.Model, result,
+				fraction(c.Now, c.Status != baseline.Removed), fraction(c.Base, c.Status != baseline.New), changes(c))
+		}
+		if err := tw.Flush(); err != nil {
+			return err
+		}
+	}
+	switch {
+	case identical > 0 && len(rows) == 0:
+		fmt.Fprintf(w, "  Every case (%d) gave the same answers as in the baseline.\n", identical)
+	case identical > 0:
+		fmt.Fprintf(w, "  The other %d gave the same answers as in the baseline.\n", identical)
+	}
+	return nil
+}
+
+func fraction(t stats.Tally, ok bool) string {
+	if !ok {
+		return "-"
+	}
+	return fmt.Sprintf("%d/%d", t.Passed, t.Total)
+}
+
+func changes(c baseline.CaseResult) string {
+	switch {
+	case c.Status == baseline.New || c.Status == baseline.Removed:
+		return "-"
+	case len(c.Changes) == 0:
+		return "answers only" // same inputs, so the model or server answered differently
+	default:
+		return strings.Join(c.Changes, ", ")
+	}
+}
+
+// short shortens a digest for display.
+func short(digest string) string {
+	digest = strings.TrimPrefix(digest, "sha256:")
+	if len(digest) > 12 {
+		return digest[:12]
+	}
+	return digest
 }
 
 // writeCases writes how often each case passed for each model. It is
@@ -130,15 +259,15 @@ func writeComparison(w io.Writer, comps []runner.Comparison) {
 			continue
 		case d.Significant() && d.Mean > 0:
 			fmt.Fprintf(w, "  %s passes more often: %s points (95%% interval %s to %s).\n",
-				c.Model, points(d.Mean), points(d.Lo), points(d.Hi))
+				c.Model, stats.Points(d.Mean), stats.Points(d.Lo), stats.Points(d.Hi))
 		case d.Significant():
 			fmt.Fprintf(w, "  %s passes less often: %s points (95%% interval %s to %s).\n",
-				c.Model, points(d.Mean), points(d.Lo), points(d.Hi))
+				c.Model, stats.Points(d.Mean), stats.Points(d.Lo), stats.Points(d.Hi))
 		case c.Same:
 			fmt.Fprintf(w, "  %s: same pass count on every case.\n", c.Model)
 		default:
 			fmt.Fprintf(w, "  %s: no significant difference (%s points, 95%% interval %s to %s).\n",
-				c.Model, points(d.Mean), points(d.Lo), points(d.Hi))
+				c.Model, stats.Points(d.Mean), stats.Points(d.Lo), stats.Points(d.Hi))
 		}
 		writeCaseDiffs(w, "better", c.Better)
 		writeCaseDiffs(w, "worse", c.Worse)
@@ -154,21 +283,6 @@ func writeCaseDiffs(w io.Writer, label string, diffs []runner.CaseDiff) {
 	for _, d := range diffs {
 		fmt.Fprintf(w, "    %s on %s: %d/%d vs %d/%d (p = %.3f)\n", label, d.Case,
 			d.Model.Passed, d.Model.Total, d.Reference.Passed, d.Reference.Total, d.P)
-	}
-}
-
-// points formats a difference in pass rates as signed percentage points.
-// A difference that rounds to 0 but isn't 0 keeps one decimal, so an
-// interval that only just excludes zero doesn't read as "0 to +38".
-func points(x float64) string {
-	p := x * 100
-	switch {
-	case math.Abs(p) < 0.05:
-		return "0"
-	case math.Abs(p) < 0.5:
-		return fmt.Sprintf("%+.1f", p)
-	default:
-		return fmt.Sprintf("%+.0f", p)
 	}
 }
 
@@ -226,11 +340,11 @@ func loadTime(m runner.ModelSummary) string {
 	return ms(m.Load)
 }
 
-func verdict(rep *runner.Report) string {
+func verdict(rep *runner.Report, gate *Gate) string {
 	switch {
 	case rep.Interrupted:
 		return "INTERRUPTED"
-	case rep.Passed():
+	case gate != nil && len(gate.Failures) == 0, gate == nil && rep.Passed():
 		return "PASS"
 	default:
 		return "FAIL"

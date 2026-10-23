@@ -241,3 +241,51 @@ func TestWarnings(t *testing.T) {
 		})
 	}
 }
+
+func TestLimits(t *testing.T) {
+	src := "name: x\nmodels: [m:a]\nprompt: p\ncases: [{assert: [{contains: a}]}]\n"
+	s, err := Parse(strings.NewReader(src+"min_pass_rate: 80%\nmax_latency_increase: 12.5 %\n"), "test.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if *s.MinPassRate != 0.8 || *s.MaxLatencyIncrease != 0.125 || s.MinPassRate.String() != "80%" {
+		t.Errorf("limits = %v, %v", *s.MinPassRate, *s.MaxLatencyIncrease)
+	}
+
+	for limits, wantErr := range map[string]string{
+		"min_pass_rate: 0.8":         `want a percentage like "80%", got "0.8"`,
+		"min_pass_rate: lots%":       `got "lots%"`,
+		"min_pass_rate: [80%]":       "want a percentage",
+		"min_pass_rate: 120%":        "min_pass_rate must be between 0% and 100%, got 120%",
+		"max_latency_increase: -10%": "max_latency_increase must be 0% or more, got -10%",
+	} {
+		if _, err := Parse(strings.NewReader(src+limits+"\n"), "test.yaml"); err == nil || !strings.Contains(err.Error(), wantErr) {
+			t.Errorf("%s: error = %v, want it to contain %q", limits, err, wantErr)
+		}
+	}
+}
+
+// A check's canonical form ignores how it is written, so reformatting a
+// suite doesn't look like a change to its checks.
+func TestAssertCanonical(t *testing.T) {
+	parse := func(asserts string) []string {
+		t.Helper()
+		s, err := Parse(strings.NewReader("name: x\nmodels: [m:a]\nprompt: p\ncases:\n  - assert:\n"+asserts), "test.yaml")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []string
+		for _, a := range s.Cases[0].Assert {
+			out = append(out, a.Canonical())
+		}
+		return out
+	}
+	a := parse("      - contains: \"30 days\"\n      - max_length: 500\n")
+	b := parse("      # a comment\n      - contains: 30 days   # and another\n\n      - max_length: 0x1F4\n")
+	if fmt.Sprint(a) != fmt.Sprint(b) || a[0] != `contains: "30 days"` {
+		t.Errorf("canonical forms differ:\n%q\n%q", a, b)
+	}
+	if c := parse("      - contains: \"14 days\"\n      - max_length: 500\n"); c[0] == a[0] {
+		t.Error("a changed check has the same canonical form")
+	}
+}
