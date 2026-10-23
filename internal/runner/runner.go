@@ -50,8 +50,10 @@ type Report struct {
 	Models []ModelInfo `json:"models,omitempty"`
 	// Loads records how long each model took to load before its cases ran,
 	// for providers that load models.
-	Loads   []ModelLoad `json:"loads,omitempty"`
-	Results []Result    `json:"results"`
+	Loads []ModelLoad `json:"loads,omitempty"`
+	// Cases records what each case sent and checked, in suite order.
+	Cases   []CaseInfo `json:"cases,omitempty"`
+	Results []Result   `json:"results"`
 }
 
 // ModelInfo identifies the exact build of a model the suite ran.
@@ -120,6 +122,9 @@ func (r *Runner) Run(ctx context.Context, s *suite.Suite) (*Report, error) {
 	}
 
 	rep := &Report{Suite: s.Name, Started: time.Now(), Models: models}
+	for i := range cases {
+		rep.Cases = append(rep.Cases, CaseInfo{Name: cases[i].Name, Fingerprint: fingerprint(s, &cases[i])})
+	}
 	defer func() { rep.Duration = time.Since(rep.Started) }()
 
 	// Models are the outer loop so each local model is loaded into memory once,

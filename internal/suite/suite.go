@@ -2,12 +2,14 @@
 package suite
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"text/template"
 
@@ -26,6 +28,14 @@ type Suite struct {
 	PromptFile string         `yaml:"prompt_file"`
 	Samples    int            `yaml:"samples"`
 	Cases      []Case         `yaml:"cases"`
+
+	// MinPassRate, if set, is the lowest pass rate each model may have.
+	// Without a baseline it replaces the default rule that every case must
+	// pass; with one, it applies on top of the regression check.
+	MinPassRate *Percent `yaml:"min_pass_rate"`
+	// MaxLatencyIncrease, if set, is how much slower than the baseline each
+	// model's median latency may get. It only applies with a baseline.
+	MaxLatencyIncrease *Percent `yaml:"max_latency_increase"`
 
 	tmpl *template.Template
 }
@@ -61,6 +71,39 @@ func (a *AssertSpec) UnmarshalYAML(n *yaml.Node) error {
 // Decode decodes the assertion's value into v.
 func (a AssertSpec) Decode(v any) error {
 	return a.value.Decode(v)
+}
+
+// Canonical returns the assertion as a stable string of its type and value,
+// without line numbers, comments or formatting, so it changes only when the
+// check itself does.
+func (a AssertSpec) Canonical() string {
+	var v any
+	if err := a.value.Decode(&v); err != nil {
+		return a.Type + ": " + a.value.Value
+	}
+	b, err := json.Marshal(v) // sorts map keys
+	if err != nil {
+		return fmt.Sprintf("%s: %v", a.Type, v)
+	}
+	return a.Type + ": " + string(b)
+}
+
+// Percent is a fraction written as a percentage in YAML, like "80%".
+type Percent float64
+
+// UnmarshalYAML implements yaml.Unmarshaler.
+func (p *Percent) UnmarshalYAML(n *yaml.Node) error {
+	num, ok := strings.CutSuffix(strings.TrimSpace(n.Value), "%")
+	f, err := strconv.ParseFloat(strings.TrimSpace(num), 64)
+	if n.Kind != yaml.ScalarNode || !ok || err != nil || math.IsNaN(f) || math.IsInf(f, 0) {
+		return fmt.Errorf("line %d: want a percentage like \"80%%\", got %q", n.Line, n.Value)
+	}
+	*p = Percent(f / 100)
+	return nil
+}
+
+func (p Percent) String() string {
+	return strconv.FormatFloat(float64(p)*100, 'f', -1, 64) + "%"
 }
 
 // Load reads and validates the suite at path. A prompt_file is resolved
@@ -164,6 +207,12 @@ func (s *Suite) validate() error {
 			errs = append(errs, err)
 		}
 	}
+	if p := s.MinPassRate; p != nil && (*p < 0 || *p > 1) {
+		errs = append(errs, fmt.Errorf("min_pass_rate must be between 0%% and 100%%, got %s", p))
+	}
+	if p := s.MaxLatencyIncrease; p != nil && *p < 0 {
+		errs = append(errs, fmt.Errorf("max_latency_increase must be 0%% or more, got %s", p))
+	}
 	if v, ok := s.Options["temperature"]; ok {
 		if _, ok := number(v); !ok {
 			errs = append(errs, fmt.Errorf("options.temperature must be a number, got %v", v))
@@ -220,6 +269,13 @@ func (s *Suite) SampleSeed(n int) (int64, bool) {
 	}
 	seed, _ := wholeNumber(v) // checked in validate
 	return seed + int64(n-1), true
+}
+
+// SetSamples changes how many times each case runs, and checks the suite
+// again, since the samples' seeds depend on it.
+func (s *Suite) SetSamples(n int) error {
+	s.Samples = n
+	return s.validate()
 }
 
 // Warnings reports settings that are valid but probably not what the author

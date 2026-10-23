@@ -222,3 +222,80 @@ func TestRunInterruptedStillWritesResults(t *testing.T) {
 		t.Errorf("saved results = %s, want 1 interrupted report with the 1 finished case", b)
 	}
 }
+
+func TestRunBaselineGate(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "base.json")
+	// The mock echoes the prompt; "refunds" always fails, a known failure.
+	suiteSrc := `name: gate
+models: [mock:echo]
+prompt: "Returns are accepted within 30 days ({{.q}})"
+samples: 5
+cases:
+  - {name: window, vars: {q: a}, assert: [{contains: "30 days"}]}
+  - {name: again, vars: {q: b}, assert: [{contains: "30 days"}]}
+  - {name: refunds, vars: {q: c}, assert: [{contains: "refund"}]}
+`
+	path := writeSuite(t, suiteSrc)
+
+	// Saving works even though a case fails; the run itself still fails.
+	_, stderr, err := execute(t, "run", path, "-q", "--save-baseline", base)
+	if !errors.Is(err, errSuiteFailed) || !strings.Contains(stderr, "Saved baseline to "+base) {
+		t.Fatalf("save: err = %v, stderr = %q", err, stderr)
+	}
+
+	// Unchanged: the known failure doesn't fail the gate.
+	stdout, _, err := execute(t, "run", path, "-q", "--baseline", base)
+	if err != nil || !strings.Contains(stdout, "Every case (3) gave the same answers as in the baseline.") || !strings.Contains(stdout, "PASS  gate") {
+		t.Errorf("unchanged run: err = %v\n%s", err, stdout)
+	}
+
+	// A prompt edit that breaks two cases is a regression.
+	edited := writeSuite(t, strings.Replace(suiteSrc, "within 30 days", "within 14 days", 1))
+	stdout, _, err = execute(t, "run", edited, "-q", "--baseline", base)
+	if !errors.Is(err, errSuiteFailed) || !strings.Contains(stdout, "mock:echo regressed on window: 0/5, was 5/5") ||
+		!strings.Contains(stdout, "FAIL  gate") {
+		t.Errorf("edited run: err = %v\n%s", err, stdout)
+	}
+
+	// A new model is reported, never failed.
+	stdout, _, err = execute(t, "run", path, "-q", "--baseline", base, "--models", "mock:echo,mock:other")
+	if err != nil || !strings.Contains(stdout, "mock:other: new, not in the baseline.") {
+		t.Errorf("new model: err = %v\n%s", err, stdout)
+	}
+}
+
+func TestRunBaselineErrors(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "base.json")
+	for _, tt := range []struct {
+		args    []string
+		wantErr string
+	}{
+		{[]string{"--baseline", base, "--save-baseline", filepath.Join(dir, ".", "base.json")}, "name the same file"},
+		{[]string{"--baseline", filepath.Join(dir, "missing.json")}, "no such file"},
+		{[]string{"--save-baseline", filepath.Join(dir, "nope", "base.json")}, "--save-baseline: folder"},
+	} {
+		_, _, err := execute(t, append([]string{"run", "../../examples/offline.yaml", "-q"}, tt.args...)...)
+		if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+			t.Errorf("%v: error = %v, want %q", tt.args, err, tt.wantErr)
+		}
+	}
+}
+
+func TestRunSamplesOverridesSuite(t *testing.T) {
+	stdout, _, err := execute(t, "run", "../../examples/offline.yaml", "-q", "--samples", "3")
+	if err != nil || !strings.Contains(stdout, "6/6") {
+		t.Errorf("err = %v, want 2 cases × 3 samples:\n%s", err, stdout)
+	}
+	for _, n := range []string{"0", "-1"} {
+		if _, _, err := execute(t, "run", "../../examples/offline.yaml", "--samples", n); err == nil || !strings.Contains(err.Error(), "--samples must be at least 1") {
+			t.Errorf("--samples %s: error = %v", n, err)
+		}
+	}
+	// Each sample's seed must still be valid with more samples.
+	path := writeSuite(t, "name: x\nmodels: [mock:echo]\noptions: {seed: 4294967294}\nprompt: hi\ncases: [{assert: [{contains: hi}]}]\n")
+	if _, _, err := execute(t, "run", path, "--samples", "5"); err == nil || !strings.Contains(err.Error(), "options.seed is too large") {
+		t.Errorf("error = %v, want a seed range error", err)
+	}
+}

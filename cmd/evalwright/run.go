@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/blashkar/evalwright/internal/baseline"
 	"github.com/blashkar/evalwright/internal/ollama"
 	"github.com/blashkar/evalwright/internal/provider"
 	"github.com/blashkar/evalwright/internal/report"
@@ -25,22 +27,30 @@ type runOptions struct {
 	pull     bool
 	quiet    bool
 	models   []string
+	samples  int
+	// baseline and saveBaseline are the paths of --baseline and --save-baseline.
+	baseline, saveBaseline string
 }
 
 func newRunCmd() *cobra.Command {
 	var opts runOptions
 	cmd := &cobra.Command{
 		Use:   "run SUITE...",
-		Short: "Run suites and exit non-zero if any case fails",
+		Short: "Run suites and exit non-zero if any case fails, or with --baseline, if results got worse",
 		Example: `  evalwright run evalwright.yaml
   evalwright run evals/*.yaml --pull -o results.json
   evalwright run suite.yaml --parallel 4   # if OLLAMA_NUM_PARALLEL=4
-  evalwright run suite.yaml --models ollama:llama3.2:3b,ollama:qwen2.5:7b`,
+  evalwright run suite.yaml --models ollama:llama3.2:3b,ollama:qwen2.5:7b
+  evalwright run suite.yaml --save-baseline baseline.json   # record today's results
+  evalwright run suite.yaml --baseline baseline.json        # fail only if they got worse`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if cmd.Flags().Changed("models") && len(opts.models) == 0 {
 				// Otherwise --models "" would quietly run the suite's models.
 				return errors.New("--models is empty")
+			}
+			if cmd.Flags().Changed("samples") && opts.samples < 1 {
+				return fmt.Errorf("--samples must be at least 1, got %d", opts.samples)
 			}
 			return runSuites(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), args, opts)
 		},
@@ -53,6 +63,10 @@ func newRunCmd() *cobra.Command {
 	f.BoolVarP(&opts.quiet, "quiet", "q", false, "don't print progress while running")
 	f.StringSliceVarP(&opts.models, "models", "m", nil,
 		"run these models instead of the suite's, comma-separated; the first is the one the others are compared with")
+	f.IntVar(&opts.samples, "samples", 0, "run each case this many times instead of the suite's samples")
+	f.StringVar(&opts.baseline, "baseline", "",
+		"compare with this saved baseline, and fail only if results got significantly worse")
+	f.StringVar(&opts.saveBaseline, "save-baseline", "", "save this run's results as a baseline to this file")
 	return cmd
 }
 
@@ -65,6 +79,23 @@ func runSuites(ctx context.Context, out, errOut io.Writer, paths []string, opts 
 	models, err := cleanModels(opts.models)
 	if err != nil {
 		return err
+	}
+	if opts.saveBaseline != "" {
+		// Checked now rather than after a run that may take an hour.
+		if fi, err := os.Stat(filepath.Dir(opts.saveBaseline)); err != nil || !fi.IsDir() {
+			return fmt.Errorf("--save-baseline: folder %s doesn't exist", filepath.Dir(opts.saveBaseline))
+		}
+	}
+	var base *baseline.File
+	if opts.baseline != "" {
+		if sameFile(opts.baseline, opts.saveBaseline) {
+			// Overwriting the baseline on every run would accept each
+			// regression as the new normal.
+			return errors.New("--baseline and --save-baseline name the same file; save a new baseline in a separate run once you've reviewed the results")
+		}
+		if base, err = baseline.Load(opts.baseline); err != nil {
+			return err
+		}
 	}
 	progress := errOut
 	if opts.quiet {
@@ -104,6 +135,12 @@ func runSuites(ctx context.Context, out, errOut io.Writer, paths []string, opts 
 		if len(models) > 0 {
 			s.Models = models
 		}
+		if opts.samples > 0 {
+			if err := s.SetSamples(opts.samples); err != nil {
+				loadErrs = append(loadErrs, fmt.Errorf("%s: %w", path, err))
+				continue
+			}
+		}
 		if err := r.Check(s); err != nil {
 			loadErrs = append(loadErrs, fmt.Errorf("%s: %w", path, err))
 			continue
@@ -128,13 +165,18 @@ func runSuites(ctx context.Context, out, errOut io.Writer, paths []string, opts 
 		var rep *runner.Report
 		rep, runErr = r.Run(ctx, s)
 		if rep != nil {
+			gate := &report.Gate{}
+			if base != nil {
+				gate.Baseline = baseline.Compare(base, rep)
+			}
+			gate.Failures = baseline.Failures(rep, s, gate.Baseline)
 			// Print partial results even if the run was interrupted.
 			fmt.Fprintln(progress)
-			if err := report.Table(out, rep); err != nil {
+			if err := report.Table(out, rep, gate); err != nil {
 				return err
 			}
 			reports = append(reports, rep)
-			failed = failed || !rep.Passed()
+			failed = failed || len(gate.Failures) > 0
 		}
 		if runErr != nil {
 			break
@@ -149,6 +191,17 @@ func runSuites(ctx context.Context, out, errOut io.Writer, paths []string, opts 
 	}
 	if runErr != nil {
 		return runErr
+	}
+	if opts.saveBaseline != "" {
+		// Saved even if cases failed: known failures are part of the baseline.
+		b, err := baseline.FromReports(reports)
+		if err == nil {
+			err = b.Save(opts.saveBaseline)
+		}
+		if err != nil {
+			return fmt.Errorf("saving baseline: %w", err)
+		}
+		fmt.Fprintf(errOut, "Saved baseline to %s\n", opts.saveBaseline)
 	}
 	if failed {
 		return errSuiteFailed
@@ -174,6 +227,16 @@ func cleanModels(models []string) ([]string, error) {
 		out = append(out, m)
 	}
 	return out, nil
+}
+
+// sameFile reports whether paths a and b name the same file.
+func sameFile(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	absA, errA := filepath.Abs(a)
+	absB, errB := filepath.Abs(b)
+	return errA == nil && errB == nil && absA == absB
 }
 
 // newProviders returns every provider a suite can use. Creating them makes no

@@ -11,7 +11,7 @@ Change a prompt, swap `llama3.1:8b` for `qwen3:30b`, or try a smaller quantizati
 
 It's a single Go binary that runs entirely on your machine. No API keys and no Python environment.
 
-> **Status:** early development. Ollama support, concurrent runs and deterministic assertions work today. Baselines, LLM-graded assertions and more report formats are next (see [Roadmap](#roadmap)).
+> **Status:** early development. Ollama support, concurrent runs, deterministic assertions, model comparison and baseline regression gating work today. LLM-graded assertions and more report formats are next (see [Roadmap](#roadmap)).
 
 ## Quickstart
 
@@ -76,6 +76,10 @@ cases:
       - icontains: "settings"
       - max_length: 400
       - max_latency_ms: 5000
+
+# Optional rules for when the run passes; see "Catching regressions".
+# min_pass_rate: 80%            # each model must pass 80% of samples, instead of every case passing
+# max_latency_increase: 25%     # with --baseline: fail if a model's median latency rises more than this
 ```
 
 More in [`examples/`](examples). `evalwright models` lists your installed models in the `provider:model` form a suite expects.
@@ -112,8 +116,8 @@ LLM output varies, so `samples: N` runs each case N times and reports a pass rat
 
 | Code | Meaning |
 |---|---|
-| 0 | every case passed |
-| 1 | the run finished and at least one case failed |
+| 0 | the run passed: every case passed, or, with `min_pass_rate` or `--baseline`, their rules were met |
+| 1 | the run finished and failed: a case failed, or, with `--baseline`, results got significantly worse. The report ends with the reasons. |
 | 2 | evalwright could not run (bad suite file, missing model, Ollama not running, …) |
 | 130 | interrupted with Ctrl-C (results finished so far are still printed, and saved with `-o`) |
 
@@ -127,6 +131,9 @@ LLM output varies, so `samples: N` runs each case N times and reports a pass rat
 | `-o, --output` | | Also save full results, including every output, as JSON. |
 | `-q, --quiet` | off | Hide progress lines. Progress goes to stderr, so the report on stdout can be piped either way. |
 | `-m, --models` | | Run these models instead of the suite's, comma-separated. The first one is the reference the others are compared with. |
+| `--samples` | | Run each case this many times instead of the suite's `samples`. |
+| `--save-baseline` | | Save this run's results as a baseline file. Saved even if cases fail: known failures are part of the baseline. |
+| `--baseline` | | Compare with a saved baseline, and fail only if results got significantly worse. |
 
 **Choosing `--parallel`:** match it to what your server actually runs in parallel (`OLLAMA_NUM_PARALLEL`). Extra requests wait in Ollama's queue, and that wait is measured as latency. On a server handling one request at a time, the same cases averaged 0.67s with `-p 1` and 1.3s with `-p 2`.
 
@@ -181,7 +188,7 @@ Evaluations answer two different questions, and they need different rules.
 | Compares | Different models, same cases and seeds | The same model, before and after a change |
 | Failures | Expected; you read the comparison and decide | Known failures are accepted; only new ones matter |
 | Gate | None: it's a report | Fail CI when results get significantly worse |
-| In evalwright | `run` with several models, or `--models` | `--save-baseline` / `--baseline` (next milestone) |
+| In evalwright | `run` with several models, or `--models` | `--save-baseline`, then `--baseline` in CI |
 
 Not every kind of check suits both:
 
@@ -196,6 +203,64 @@ Not every kind of check suits both:
 | Public benchmarks (MMLU, GSM8K, …) | general ability, not your task; use [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness) | ✗ |
 
 A test set built from your own task beats a public benchmark for both jobs: benchmarks say how capable a model is in general, not whether it follows your instructions.
+
+## Catching regressions with a baseline
+
+Save a run you're happy with, commit the file, and compare every later run with it:
+
+```sh
+evalwright run suite.yaml --samples 10 --save-baseline baseline.json   # once, and after accepted changes
+evalwright run suite.yaml --samples 10 --baseline baseline.json        # in CI: exit 1 only if results got worse
+```
+
+A baseline stores, for every model and case, the pass count, the seeds, the model's digest, its median latency, and hashes of what the case sent and checked (system prompt, rendered prompt, options, assertions) and of the answers it got. It stores hashes, not text, so it is small and doesn't copy your prompts or answers. `--baseline` and `--save-baseline` can't be the same file, so a failing run can't overwrite the baseline it's judged against.
+
+Each case gets one of these results:
+
+| Result | Meaning |
+|---|---|
+| identical | Same inputs, checks and model build, and the same answers. With fixed seeds an unchanged case reproduces exactly, so this is the usual result. |
+| unchanged | Same pass count, though something differs (the report says what). |
+| changed | The pass count differs, but not by more than chance explains. |
+| regressed / improved | It passes significantly less or more often: a one-sided Fisher's exact test, Holm-corrected across the cases, p < 0.05. |
+| new / removed | Only this run, or only the baseline, has the case. |
+
+The WHAT CHANGED column says which input differs from the baseline: system prompt, prompt, options, checks, model build or samples. "answers only" means nothing you control changed, but the model answered differently.
+
+**When the gate fails.** Exit code 1 if a case regressed, if a model's overall pass rate dropped (the paired difference's 95% interval is entirely below zero), or if the suite's `min_pass_rate` or `max_latency_increase` is broken. Failures already in the baseline, new models and new cases never fail it. Latency only fails the run when the suite sets `max_latency_increase`, because it depends on whatever else the machine is doing: the same unchanged run varied by 10–40% while another program was using Ollama.
+
+**Use enough samples.** A one-case regression can only be significant if the run is big enough. With 5 samples, 5/5 falling to 0/5 has p = 0.004, but corrected for 21 cases it becomes 0.083: no single case can ever be flagged, whatever happens to it. The report warns when this is so and says how many samples would fix it (6 for 21 cases). 10 samples is a good default for a gate. The overall check still works at 5 samples, but only catches a change that is broad, not one that breaks a few cases.
+
+### Example: removing a fact from the system prompt
+
+The compare suite with llama3.2:3b at 10 samples. The baseline run passed 134 of 210 (64%) and exited 1 because some cases fail; it is saved anyway, since known failures are part of the baseline. Then:
+
+| Change | Result | Exit |
+|---|---|---|
+| None, run again | All 21 cases identical: same seeds, same answers | 0 |
+| Remove "Never invent policies…" and "Always reply in the customer's language" | No significant change (−0.5 points, −8 to +7); the 3B model mostly ignored those lines anyway | 0 |
+| Remove the Returns fact | Three cases regressed | 1 |
+
+```
+Compared with the baseline:
+  ollama:llama3.2:3b: no significant change (-6 points, 95% interval -22 to +11).
+
+  CASE                       MODEL               RESULT                 NOW    BASELINE  WHAT CHANGED
+  return-inside-window       ollama:llama3.2:3b  REGRESSED (p = 0.007)  0/10   8/10      system prompt
+  refund-time                ollama:llama3.2:3b  REGRESSED (p = 0.029)  0/10   7/10      system prompt
+  french-worn-return         ollama:llama3.2:3b  changed                8/10   2/10      system prompt
+  injection-return-window    ollama:llama3.2:3b  REGRESSED (p < 0.001)  0/10   10/10     system prompt
+  ...
+
+Failed because:
+  - ollama:llama3.2:3b regressed on return-inside-window: 0/10, was 8/10 (p = 0.007)
+  - ollama:llama3.2:3b regressed on refund-time: 0/10, was 7/10 (p = 0.029)
+  - ollama:llama3.2:3b regressed on injection-return-window: 0/10, was 10/10 (p < 0.001)
+```
+
+Without the facts, the model fails the cases that needed them. It "passes" french-worn-return more often because, with no policy to quote, it no longer says worn shoes can be returned. The overall rate barely moves, so only the per-case tests catch this.
+
+The same change at 5 samples passed the gate: the same cases fell to 0/5, but at that size none of them could be significant after the correction for 21 cases, and the report said so ("Too few samples to flag a single case … Use 6 or more samples per case").
 
 ## Example: comparing two local models
 
@@ -267,6 +332,7 @@ internal/provider/   Provider interface, registry, Ollama and mock providers
 internal/assert/     Assertion interface and built-in assertions
 internal/runner/     concurrent runner: prepare, warm, run, collect, summarize, compare
 internal/stats/      intervals, paired differences, Fisher's exact test, Holm correction
+internal/baseline/   saved baselines, comparison with a baseline, pass/fail rules
 internal/report/     terminal table and JSON output
 examples/            example suites (embedded; `init` copies quickstart.yaml)
 ```
@@ -290,7 +356,7 @@ make demo          # run the quickstart against Ollama
 - [ ] On-disk response cache, retries
 - [x] Speed metrics (latency percentiles, time to first token, tokens/sec, answer length, load time) and pass-rate confidence intervals
 - [x] Paired model comparison with clustered intervals, per-case exact tests and multiple-comparison correction; `--models`; model digests in results
-- [ ] Baselines: `--save-baseline` / `--compare` with regression gating
+- [x] Baselines: `--save-baseline` / `--baseline` with regression gating, `min_pass_rate`, `max_latency_increase`, `--samples`
 - [ ] `llm_judge`, `json_schema`, `tool_called`, `similar_to` (embeddings), `safe` assertions using local models
 - [ ] JUnit, Markdown and HTML reports; red-team suite pack; releases via goreleaser
 
