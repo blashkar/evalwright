@@ -16,7 +16,7 @@ import (
 // measured with 10 samples: a realistic mix of cases that always pass,
 // never pass, and pass some of the time.
 var truth = []float64{
-	.8, .9, .4, .4, .9, .7, 1, 0, .8, 1, 1,
+	.8, .9, .4, .4, .9, .7, 1, 0, .8, .9, 1,
 	1, 1, .9, .5, .9, 0, 0, .1, .2, 1,
 }
 

@@ -4,8 +4,8 @@
 #   docker compose run --rm evalwright run my-suite.yaml     # any suite in this folder
 #   docker compose down                                      # stop Ollama (models are kept)
 #
-# The current folder is mounted at /work, so suites, -o results and baselines
-# are read from and written to it. To use an Ollama already running on this
+# This folder is mounted at /work, so suites, -o results and baselines are
+# read from and written to it. To use an Ollama already running on this
 # machine instead (on macOS, the only way to use the GPU):
 #
 #   docker compose run --rm --no-deps -e OLLAMA_HOST=http://host.docker.internal:11434 evalwright
@@ -31,7 +31,7 @@ services:
     environment:
       OLLAMA_HOST: http://ollama:11434
     extra_hosts:
-      - host.docker.internal:host-gateway # for the host's Ollama on Linux
+      - host.docker.internal:host-gateway # the host's Ollama on Linux; see the README
     volumes:
       - .:/work
     read_only: true
