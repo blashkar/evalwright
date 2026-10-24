@@ -68,6 +68,9 @@ type ModelResult struct {
 	// then the number of samples per case that would make it detectable.
 	Detectable    bool
 	SamplesNeeded int
+	// Tested is the number of cases tested for a change: those that differ
+	// from the baseline. Identical cases can't have changed.
+	Tested int
 	// Digest and BaseDigest identify the model builds, if known.
 	Digest, BaseDigest string
 	// LatencyP50 and BaseLatencyP50 are the median latencies; zero if not
@@ -154,8 +157,10 @@ func compareModel(now, base Model, interrupted bool) (ModelResult, []CaseResult)
 	}
 
 	var out []CaseResult
-	var shared []int // indexes into out of the cases both runs have
 	var nowT, baseT []stats.Tally
+	// tested indexes into out the cases that differ from the baseline; only
+	// they are tested and counted in the correction.
+	var tested []int
 	var lessP, moreP []float64
 	for _, c := range now.Cases {
 		i := slices.IndexFunc(base.Cases, func(b Case) bool { return b.Case == c.Case })
@@ -177,11 +182,13 @@ func compareModel(now, base Model, interrupted bool) (ModelResult, []CaseResult)
 		default:
 			r.Status = Changed
 		}
-		_, less := stats.FisherExact(r.Now, r.Base)
-		_, more := stats.FisherExact(r.Base, r.Now)
-		shared = append(shared, len(out))
 		nowT, baseT = append(nowT, r.Now), append(baseT, r.Base)
-		lessP, moreP = append(lessP, less), append(moreP, more)
+		if r.Status != Identical {
+			_, less := stats.FisherExact(r.Now, r.Base)
+			_, more := stats.FisherExact(r.Base, r.Now)
+			tested = append(tested, len(out))
+			lessP, moreP = append(lessP, less), append(moreP, more)
+		}
 		out = append(out, r)
 	}
 	if !interrupted {
@@ -193,37 +200,49 @@ func compareModel(now, base Model, interrupted bool) (ModelResult, []CaseResult)
 	}
 
 	// Each direction is its own family of tests, corrected for the number
-	// of cases, so testing 20 cases doesn't flag a chance difference.
+	// of cases tested, so testing 20 cases doesn't flag a chance
+	// difference. Identical cases aren't tested: with the same inputs,
+	// seeds and model build they reproduce exactly, so they can't have
+	// regressed, and counting them would only make the correction stricter.
+	// Editing one case's prompt then tests that one case alone.
 	for j, p := range stats.Holm(lessP) {
-		if r := &out[shared[j]]; p < significance && r.Status == Changed {
+		if r := &out[tested[j]]; p < significance && r.Status == Changed {
 			r.Status, r.P = Regressed, p
 		}
 	}
 	for j, p := range stats.Holm(moreP) {
-		if r := &out[shared[j]]; p < significance && r.Status == Changed {
+		if r := &out[tested[j]]; p < significance && r.Status == Changed {
 			r.Status, r.P = Improved, p
 		}
 	}
 	mr.Diff = stats.PairedDiff(nowT, baseT)
 	mr.Same = slices.Equal(nowT, baseT)
-	mr.Detectable, mr.SamplesNeeded = detectable(nowT, baseT)
+	mr.Tested = len(tested)
+	mr.Detectable, mr.SamplesNeeded = detectable(out, tested)
 	return mr, out
+}
+
+// Dropped reports whether the model passes significantly less often than
+// in the baseline overall: the 95% interval of the difference is entirely
+// below zero.
+func (m ModelResult) Dropped() bool {
+	return !m.New && m.Diff.Hi < 0
 }
 
 // detectable reports whether the strongest possible single-case regression,
 // all samples passing before and none after, would be significant across
-// these cases, and if not, how many samples per case would make it so.
-func detectable(now, base []stats.Tally) (bool, int) {
-	if len(now) == 0 {
+// the tested cases, and if not, how many samples per case would make it so.
+func detectable(cases []CaseResult, tested []int) (bool, int) {
+	if len(tested) == 0 {
 		return true, 0
 	}
 	n := math.MaxInt
-	for i := range now {
-		n = min(n, now[i].Total, base[i].Total)
+	for _, i := range tested {
+		n = min(n, cases[i].Now.Total, cases[i].Base.Total)
 	}
 	worst := func(n int) float64 { // Holm-adjusted p of n/n falling to 0/n
 		_, p := stats.FisherExact(stats.Tally{Passed: 0, Total: n}, stats.Tally{Passed: n, Total: n})
-		return p * float64(len(now))
+		return p * float64(len(tested))
 	}
 	if worst(n) < significance {
 		return true, 0
@@ -286,7 +305,7 @@ func Failures(rep *runner.Report, s *suite.Suite, cmp *Comparison) []string {
 		if m.New {
 			continue
 		}
-		if m.Diff.Hi < 0 {
+		if m.Dropped() {
 			out = append(out, fmt.Sprintf("%s passes less often than in the baseline: %s points (95%% interval %s to %s)",
 				m.Model, stats.Points(m.Diff.Mean), stats.Points(m.Diff.Lo), stats.Points(m.Diff.Hi)))
 		}

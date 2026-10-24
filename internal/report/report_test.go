@@ -227,6 +227,7 @@ func TestTableBaseline(t *testing.T) {
 					Model: "a", Diff: stats.Diff{Mean: -1.0 / 3, Lo: -0.9, Hi: 0.2, Cases: 3},
 					Digest: "sha256:0123456789abcdef", BaseDigest: "sha256:fedcba9876543210",
 					LatencyP50: 120 * time.Millisecond, BaseLatencyP50: 100 * time.Millisecond,
+					Tested: 2, SamplesNeeded: 6,
 				},
 				{Model: "b", New: true},
 			},
@@ -251,6 +252,7 @@ func TestTableBaseline(t *testing.T) {
 	for _, want := range []string{
 		"Compared with the baseline:",
 		"a: no significant change (-33 points, 95% interval -90 to +20).",
+		"Too few samples to flag a single case: with 2 cases changed, even a case going from all samples passing to none isn't significant. Use 6 or more samples",
 		"model build changed: 0123456789ab, was fedcba987654",
 		"median latency 120ms, was 100ms (+20%)",
 		"b: new, not in the baseline.",
