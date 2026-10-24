@@ -1,0 +1,43 @@
+# evalwright and Ollama in containers, so nothing needs installing but Docker.
+#
+#   docker compose run --rm evalwright                       # the quickstart suite
+#   docker compose run --rm evalwright run my-suite.yaml     # any suite in this folder
+#   docker compose down                                      # stop Ollama (models are kept)
+#
+# The current folder is mounted at /work, so suites, -o results and baselines
+# are read from and written to it. To use an Ollama already running on this
+# machine instead (on macOS, the only way to use the GPU):
+#
+#   docker compose run --rm --no-deps -e OLLAMA_HOST=http://host.docker.internal:11434 evalwright
+
+services:
+  ollama:
+    image: ollama/ollama:0.40.10
+    volumes:
+      - ollama-models:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    # No ports are published: only containers on this network can reach it.
+
+  evalwright:
+    build: .
+    image: evalwright:local
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    extra_hosts:
+      - host.docker.internal:host-gateway # for the host's Ollama on Linux
+    volumes:
+      - .:/work
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    command: [run, examples/quickstart.yaml, --pull]
+
+volumes:
+  ollama-models:
