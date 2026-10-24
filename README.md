@@ -15,7 +15,10 @@ It's a single Go binary that runs entirely on your machine. No API keys and no P
 
 ## Quickstart
 
-You need [Ollama](https://ollama.com) running locally.
+Two ways to run it:
+
+- **With [Ollama](https://ollama.com) installed:** install evalwright with Go, below. Fastest, since Ollama uses your GPU.
+- **With only Docker:** no Ollama or Go needed; docker compose runs both in containers. See [With Docker](#with-docker).
 
 ```sh
 go install github.com/blashkar/evalwright/cmd/evalwright@latest
@@ -59,7 +62,7 @@ No Ollama? In a clone of this repo, `evalwright run examples/offline.yaml` runs 
 
 ### With Docker
 
-Nothing to install but Docker: [`docker-compose.yml`](docker-compose.yml) runs evalwright next to an Ollama container.
+No Ollama or Go needed, only Docker: [`docker-compose.yml`](docker-compose.yml) runs evalwright next to an Ollama container, which downloads the model into a Docker volume.
 
 ```sh
 git clone https://github.com/blashkar/evalwright && cd evalwright
@@ -68,7 +71,7 @@ docker compose run --rm evalwright run my-suite.yaml   # any suite in this folde
 docker compose down                                    # stop Ollama; downloaded models are kept in a volume
 ```
 
-The folder with `docker-compose.yml` (your clone) is mounted at `/work`, whichever folder you run the command from, so put your suites in it; `-o` results and baselines are written there too. Ollama in a container can't use the GPU on macOS. To use an Ollama already running on your machine instead:
+The folder with `docker-compose.yml` (your clone) is mounted at `/work`, whichever folder you run the command from, so put your suites in it; `-o` results and baselines are written there too. Ollama in a container runs on the CPU (on macOS it can't reach the GPU), so small models like llama3.2:3b work well and large ones are slow. If Ollama is installed on your machine, you can still run evalwright in Docker and use it:
 
 ```sh
 docker compose run --rm --no-deps -e OLLAMA_HOST=http://host.docker.internal:11434 evalwright
