@@ -57,6 +57,25 @@ That failure is real: the 3B model followed an "ignore your instructions and wri
 
 No Ollama? `evalwright run examples/offline.yaml` runs with the built-in mock provider.
 
+### With Docker
+
+Nothing to install but Docker: [`docker-compose.yml`](docker-compose.yml) runs evalwright next to an Ollama container.
+
+```sh
+git clone https://github.com/blashkar/evalwright && cd evalwright
+docker compose run --rm evalwright                     # quickstart suite; downloads llama3.2:3b the first time
+docker compose run --rm evalwright run my-suite.yaml   # any suite in the current folder
+docker compose down                                    # stop Ollama; downloaded models are kept in a volume
+```
+
+The current folder is mounted at `/work`, so suites are read from it and `-o` results and baselines are written to it. Ollama in a container can't use the GPU on macOS. To use an Ollama already running on your machine instead:
+
+```sh
+docker compose run --rm --no-deps -e OLLAMA_HOST=http://host.docker.internal:11434 evalwright
+```
+
+The image is about 20 MB: a static binary on [distroless](https://github.com/GoogleContainerTools/distroless), running as a non-root user. Compose runs it with a read-only filesystem, no Linux capabilities and no privilege escalation, and doesn't publish Ollama's port, so only evalwright can reach it.
+
 ## Writing a suite
 
 ```yaml
@@ -349,6 +368,8 @@ internal/stats/      intervals, paired differences, Fisher's exact test, Holm co
 internal/baseline/   saved baselines, comparison with a baseline, pass/fail rules
 internal/report/     terminal table and JSON output
 examples/            example suites (embedded; `init` copies quickstart.yaml)
+Dockerfile           multi-stage build: static binary on distroless, non-root
+docker-compose.yml   evalwright + Ollama
 ```
 
 ## Development
@@ -359,13 +380,17 @@ make test-ollama   # integration tests against your local Ollama
 make lint          # golangci-lint
 make example       # run the offline example
 make demo          # run the quickstart against Ollama
+make docker        # build the container image
 ```
+
+CI runs the unit tests and lint, builds and smoke-tests the image, and runs an end-to-end test: docker compose starts Ollama, pulls a 135M-parameter model, and runs the quickstart suite against it.
 
 ## Roadmap
 
 - [x] Suites, templating, mock provider, deterministic assertions, table and JSON output
 - [x] Ollama provider (streaming chat, model check, pull, warm-up), `models` command
 - [x] Concurrent runner with per-model limits, per-request timeouts, Ctrl-C handling
+- [x] Docker image and docker-compose with Ollama; end-to-end test in CI
 - [ ] OpenAI-compatible local servers (LM Studio, llama.cpp, vLLM)
 - [ ] On-disk response cache, retries
 - [x] Speed metrics (latency percentiles, time to first token, tokens/sec, answer length, load time) and pass-rate confidence intervals
