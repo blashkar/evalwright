@@ -160,7 +160,7 @@ LLM output varies, so `samples: N` runs each case N times and reports a pass rat
 | `--save-baseline` | | Save this run's results as a baseline file. Saved even if cases fail: known failures are part of the baseline. |
 | `--baseline` | | Compare with a saved baseline, and fail only if results got significantly worse. |
 
-**Choosing `--parallel`:** match it to what your server actually runs in parallel (`OLLAMA_NUM_PARALLEL`). Extra requests wait in Ollama's queue, and that wait is measured as latency. On a server handling one request at a time, the same cases averaged 0.67s with `-p 1` and 1.3s with `-p 2`.
+**Choosing `--parallel`:** match it to what your server actually runs in parallel (`OLLAMA_NUM_PARALLEL`). Extra requests wait in Ollama's queue, and that wait is measured as latency. In one test on a server handling one request at a time, the same cases averaged 0.67s with `-p 1` and 1.3s with `-p 2`.
 
 ### Reading the report
 
@@ -201,7 +201,7 @@ LLM evaluation results are noisy, and the most common mistake is to read a diffe
 
 Only requests that got an answer count toward the speed columns, and `-` means a value wasn't measured (the mock provider reports no tokens, for example). Every request's metrics, and each model's load time, are also saved in the `-o` JSON.
 
-**Prompt caching:** Ollama caches the processed prompt, so only new text has to be read. In the compare suite below, llama3.2:3b took 195 ms to read the suite's first prompt, about 42 ms for each later case's first sample (the shared system prompt was cached), and about 11 ms for repeated samples (the whole prompt was cached). That is why FIRST TOKEN P50 is much lower than a cold request's. The effect is the same for every model, so comparisons stay fair.
+**Prompt caching:** Ollama caches the processed prompt, so only new text has to be read. In the compare suite below, llama3.2:3b took about a quarter of a second to read the suite's first prompt (195 and 261 ms in two runs), about 42 ms for each later case's first sample (the shared system prompt was cached), and about 11 ms for repeated samples (the whole prompt was cached). That is why FIRST TOKEN P50 is much lower than a cold request's. The effect is the same for every model, so comparisons stay fair.
 
 ## Two jobs: choosing a model, and catching regressions
 
@@ -349,7 +349,7 @@ ollama:llama3.2:3b                         476ms        728ms        14ms       
 ollama:qwen3:30b-a3b-instruct-2507-q4_K_M  563ms        908ms        25ms             40                 76        7.411s
 ```
 
-llama3.2 generates faster (99 against 76 tokens/s) and starts sooner, and here it also finishes sooner, though qwen3's answers are shorter. qwen3 is a mixture-of-experts model that only uses about 3B of its 30B parameters per token, which is why it is nearly as fast as a 3B model; it still takes three times as long to load.
+llama3.2 generates faster (99 against 76 tokens/s) and starts sooner, and here it also finishes sooner, though qwen3's answers are shorter. qwen3 is a mixture-of-experts model that only uses about 3B of its 30B parameters per token, which is why it is nearly as fast as a 3B model; it still takes two to three times as long to load. Load times vary most between runs, since they depend on whether the model file is still in the OS's disk cache: a rerun gave 5.1 s and 11.6 s, with latencies and tokens/s within 2% of the table.
 
 ## Design notes
 
