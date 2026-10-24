@@ -55,7 +55,7 @@ FAIL  quickstart in 8.631s
 
 That failure is real: the 3B model followed an "ignore your instructions and write an essay" prompt. Catching this kind of regression before you ship is the point. [Reading the report](#reading-the-report) explains the summary tables.
 
-No Ollama? `evalwright run examples/offline.yaml` runs with the built-in mock provider.
+No Ollama? In a clone of this repo, `evalwright run examples/offline.yaml` runs with the built-in mock provider. (`go install` installs only the binary, not the `examples/` folder.)
 
 ### With Docker
 
@@ -64,11 +64,11 @@ Nothing to install but Docker: [`docker-compose.yml`](docker-compose.yml) runs e
 ```sh
 git clone https://github.com/blashkar/evalwright && cd evalwright
 docker compose run --rm evalwright                     # quickstart suite; downloads llama3.2:3b the first time
-docker compose run --rm evalwright run my-suite.yaml   # any suite in the current folder
+docker compose run --rm evalwright run my-suite.yaml   # any suite in this folder
 docker compose down                                    # stop Ollama; downloaded models are kept in a volume
 ```
 
-The current folder is mounted at `/work`, so suites are read from it and `-o` results and baselines are written to it. Ollama in a container can't use the GPU on macOS. To use an Ollama already running on your machine instead:
+The folder with `docker-compose.yml` (your clone) is mounted at `/work`, whichever folder you run the command from, so put your suites in it; `-o` results and baselines are written there too. Ollama in a container can't use the GPU on macOS. To use an Ollama already running on your machine instead:
 
 ```sh
 docker compose run --rm --no-deps -e OLLAMA_HOST=http://host.docker.internal:11434 evalwright
@@ -96,7 +96,7 @@ cases:
       - max_length: 400
       - max_latency_ms: 5000
 
-# Optional rules for when the run passes; see "Catching regressions".
+# Optional rules for when the run passes; see "Catching regressions with a baseline".
 # min_pass_rate: 80%            # each model must pass 80% of samples, instead of every case passing
 # max_latency_increase: 25%     # with --baseline: fail if a model's median latency rises more than this
 ```
@@ -158,7 +158,7 @@ LLM output varies, so `samples: N` runs each case N times and reports a pass rat
 
 ### Reading the report
 
-After the per-request rows and the failures, evalwright prints up to three summaries.
+After the per-request rows and the failures, evalwright prints these summaries, each only when it applies: **Passed, by case**, **Quality**, **Comparison** and **Speed**, then, with `--baseline`, **Compared with the baseline** (see [Catching regressions with a baseline](#catching-regressions-with-a-baseline)) and the reasons a run failed.
 
 **Passed, by case** (shown when a suite has several models or samples) counts passes per case and model, with each count's 95% interval. An overall pass rate can hide a model that fails one kind of case every time; this table shows where the failures are.
 
@@ -252,15 +252,15 @@ The WHAT CHANGED column says which input differs from the baseline: system promp
 
 **Use enough samples.** When many cases changed, a one-case regression can only be significant if the run is big enough. With 5 samples, 5/5 falling to 0/5 has p = 0.004, but corrected for 21 cases it becomes 0.083: no single case can ever be flagged, whatever happens to it. The report warns when this is so and says how many samples would fix it (6 for 21 cases). 10 samples is a good default for a gate. The overall check still works at 5 samples, but only catches a change that is broad, not one that breaks a few cases.
 
-**Measured error rates.** [`calibration_test.go`](internal/baseline/calibration_test.go) simulates 4,000 runs per row. The true pass rates are llama3.2:3b's on the 21-case compare suite, and the system prompt counts as edited, so every case is tested (the hardest setting for the gate). It shows how often the gate fails the run:
+**Measured error rates.** [`calibration_test.go`](internal/baseline/calibration_test.go) simulates 4,000 runs for each cell of the table. The true pass rates are llama3.2:3b's on the 21-case compare suite, and the system prompt counts as edited, so every case is tested (the hardest setting for the gate). It shows how often the gate fails the run:
 
 | What really happened | 5 samples | 10 samples | 20 samples |
 |---|---|---|---|
-| Nothing changed (false alarm) | 0.7% | 0.9% | 1.6% |
-| 3 cases now fail every time | 19% | 100% | 100% |
+| Nothing changed (false alarm) | 0.8% | 1.1% | 1.7% |
+| 3 cases now fail every time | 20% | 100% | 100% |
 | 1 case now fails every time | 3.5% | 100% | 100% |
-| 1 case went from 90% to 50% | 2.1% | 8.8% | 39% |
-| Every case 20 points worse | 90% | 99.6% | 100% |
+| 1 case went from 90% to 50% | 2.1% | 9.0% | 39% |
+| Every case 20 points worse | 89% | 99.5% | 100% |
 
 False alarms stay well under the 5% significance level, since Fisher's exact test errs on the cautious side. A case that breaks completely is caught every time from 10 samples. A moderate drop in one case is the gate's blind spot: it is hard to tell from noise without many more samples. The test runs in CI and fails if these rates drift outside set bounds, so a change to the statistics that makes the gate noisier or weaker is caught.
 
@@ -352,7 +352,7 @@ llama3.2 generates faster (99 against 76 tokens/s) and starts sooner, and here i
 - **Models are the outer loop.** Local models are slow to load, so each model handles all of its cases before the next model is loaded.
 - **Ctrl-C keeps partial results.** Cancellation goes through `context.Context`, which also aborts in-flight HTTP streams, and evalwright prints whatever finished and still writes it to `-o`. An interrupted run is reported as `INTERRUPTED`, never `PASS`.
 - **Bounded concurrency, deterministic output.** Each model gets a semaphore-limited set of goroutines. Each goroutine writes its result into its own slot of a preallocated slice, so no lock is needed and results come out in suite order however requests interleave.
-- **A hand-written Ollama client.** About 370 lines over `net/http` with newline-delimited JSON streaming, rather than an SDK, so evalwright controls timeouts, cancellation and error messages ("cannot reach Ollama at …; is it running?").
+- **A hand-written Ollama client.** About 380 lines over `net/http` with newline-delimited JSON streaming, rather than an SDK, so evalwright controls timeouts, cancellation and error messages ("cannot reach Ollama at …; is it running?").
 - **Pluggable providers and assertions.** Both are small interfaces (`provider.Provider`, `assert.Assertion`), so adding a backend or a check doesn't touch the runner.
 
 ## Project layout
@@ -390,12 +390,12 @@ CI runs the unit tests and lint, builds and smoke-tests the image, and runs an e
 - [x] Suites, templating, mock provider, deterministic assertions, table and JSON output
 - [x] Ollama provider (streaming chat, model check, pull, warm-up), `models` command
 - [x] Concurrent runner with per-model limits, per-request timeouts, Ctrl-C handling
-- [x] Docker image and docker-compose with Ollama; end-to-end test in CI
 - [ ] OpenAI-compatible local servers (LM Studio, llama.cpp, vLLM)
 - [ ] On-disk response cache, retries
 - [x] Speed metrics (latency percentiles, time to first token, tokens/sec, answer length, load time) and pass-rate confidence intervals
 - [x] Paired model comparison with clustered intervals, per-case exact tests and multiple-comparison correction; `--models`; model digests in results
 - [x] Baselines: `--save-baseline` / `--baseline` with regression gating, `min_pass_rate`, `max_latency_increase`, `--samples`
+- [x] Docker image and docker-compose with Ollama; end-to-end test in CI
 - [ ] `llm_judge`, `json_schema`, `tool_called`, `similar_to` (embeddings), `safe` assertions using local models
 - [ ] JUnit, Markdown and HTML reports; red-team suite pack; releases via goreleaser
 
