@@ -1,8 +1,6 @@
 # evalwright
 
 [![CI](https://github.com/blashkar/evalwright/actions/workflows/ci.yml/badge.svg)](https://github.com/blashkar/evalwright/actions/workflows/ci.yml)
-[![Go Reference](https://pkg.go.dev/badge/github.com/blashkar/evalwright.svg)](https://pkg.go.dev/github.com/blashkar/evalwright)
-[![Go Report Card](https://goreportcard.com/badge/github.com/blashkar/evalwright)](https://goreportcard.com/report/github.com/blashkar/evalwright)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 **Regression tests for LLM prompts, built for local models. Think Playwright, but for evals.**
@@ -17,7 +15,7 @@ It's a single Go binary that runs entirely on your machine. No API keys and no P
 
 Two ways to run it:
 
-- **With [Ollama](https://ollama.com) installed:** install evalwright with Go, below. Fastest, since Ollama uses your GPU.
+- **With [Ollama](https://ollama.com) installed:** install evalwright with Go, below. Fastest, since Ollama can use your GPU.
 - **With only Docker:** no Ollama or Go needed; docker compose runs both in containers. See [With Docker](#with-docker).
 
 ```sh
@@ -53,6 +51,9 @@ ollama:llama3.2:3b  3/4     75%        30–95%        0
 MODEL               LATENCY P50  LATENCY P95  FIRST TOKEN P50  ANSWER TOKENS P50  TOKENS/S  LOAD
 ollama:llama3.2:3b  143ms        6.202s       46ms             8                  97        2.059s
 
+Failed because:
+  - 1 of 4 results failed
+
 FAIL  quickstart in 8.631s
 ```
 
@@ -71,11 +72,13 @@ docker compose run --rm evalwright run my-suite.yaml   # any suite in this folde
 docker compose down                                    # stop Ollama; downloaded models are kept in a volume
 ```
 
-The folder with `docker-compose.yml` (your clone) is mounted at `/work`, whichever folder you run the command from, so put your suites in it; `-o` results and baselines are written there too. Ollama in a container runs on the CPU (on macOS it can't reach the GPU), so small models like llama3.2:3b work well and large ones are slow. If Ollama is installed on your machine, you can still run evalwright in Docker and use it:
+Run these commands in the clone. Its folder is mounted at `/work`, so suites must be inside it, and paths are relative to it; `-o` results and baselines are written there too. Ollama in a container runs on the CPU (on macOS it can't reach the GPU), so small models like llama3.2:3b work well and large ones are slow. If Ollama is installed on your machine, you can still run evalwright in Docker and use it:
 
 ```sh
 docker compose run --rm --no-deps -e OLLAMA_HOST=http://host.docker.internal:11434 evalwright
 ```
+
+This works as is with Docker Desktop (macOS, Windows). On Linux, Ollama listens only on `127.0.0.1` by default, which containers can't reach; it has to listen on the Docker bridge too (for example `OLLAMA_HOST=0.0.0.0` for `ollama serve`), and then a firewall should keep other machines out.
 
 The image is about 20 MB: a static binary on [distroless](https://github.com/GoogleContainerTools/distroless), running as a non-root user. Compose runs it with a read-only filesystem, no Linux capabilities and no privilege escalation, and doesn't publish Ollama's port, so only evalwright can reach it.
 
@@ -139,7 +142,7 @@ LLM output varies, so `samples: N` runs each case N times and reports a pass rat
 | Code | Meaning |
 |---|---|
 | 0 | the run passed: every case passed, or, with `min_pass_rate` or `--baseline`, their rules were met |
-| 1 | the run finished and failed: a case failed, or, with `--baseline`, results got significantly worse. The report ends with the reasons. |
+| 1 | the run finished and failed: a case failed, a model broke `min_pass_rate`, or, with `--baseline`, results got significantly worse. The report ends with the reasons. |
 | 2 | evalwright could not run (bad suite file, missing model, Ollama not running, …) |
 | 130 | interrupted with Ctrl-C (results finished so far are still printed, and saved with `-o`) |
 
@@ -163,7 +166,7 @@ LLM output varies, so `samples: N` runs each case N times and reports a pass rat
 
 After the per-request rows and the failures, evalwright prints these summaries, each only when it applies: **Passed, by case**, **Quality**, **Comparison** and **Speed**, then, with `--baseline`, **Compared with the baseline** (see [Catching regressions with a baseline](#catching-regressions-with-a-baseline)) and the reasons a run failed.
 
-**Passed, by case** (shown when a suite has several models or samples) counts passes per case and model, with each count's 95% interval. An overall pass rate can hide a model that fails one kind of case every time; this table shows where the failures are.
+**Passed, by case** (shown when a suite has several models or samples) counts passes per case and model, with each count's 95% interval when cases have several samples. An overall pass rate can hide a model that fails one kind of case every time; this table shows where the failures are.
 
 **Quality**
 
@@ -249,7 +252,7 @@ Each case gets one of these results:
 
 The WHAT CHANGED column says which input differs from the baseline: system prompt, prompt, options, checks, model build or samples. "answers only" means nothing you control changed, but the model answered differently.
 
-**When the gate fails.** Exit code 1 if a case regressed, if a model's overall pass rate dropped (the paired difference's 95% interval is entirely below zero), or if the suite's `min_pass_rate` or `max_latency_increase` is broken. Failures already in the baseline, new models and new cases never fail it. Latency only fails the run when the suite sets `max_latency_increase`, because it depends on whatever else the machine is doing: the same unchanged run varied by 10–40% while another program was using Ollama.
+**When the gate fails.** Exit code 1 if a case regressed, if a model's overall pass rate dropped (the paired difference's 95% interval is entirely below zero), or if the suite's `min_pass_rate` or `max_latency_increase` is broken. Otherwise, failures already in the baseline, new models and new cases never fail it; `min_pass_rate`, if set, applies to every model, new ones included. Latency only fails the run when the suite sets `max_latency_increase`, because it depends on whatever else the machine is doing: the same unchanged run varied by 10–40% while another program was using Ollama.
 
 **Only changed cases are tested.** With the same inputs, seeds and model build, a case reproduces exactly, so an identical case can't have regressed and isn't counted in the correction. If you edit one case's prompt, that case is tested on its own, and even 5/5 falling to 0/5 is caught (p = 0.004). Editing the system prompt or switching the model build changes every case, so all of them are tested.
 
@@ -302,7 +305,7 @@ The same change at 5 samples passed the gate: the same cases fell to 0/5, but at
 
 [`examples/compare-models.yaml`](examples/compare-models.yaml) tests both models as a support assistant for a fictional shoe store, with 21 cases × 5 samples. The system prompt lists the store's facts, so each case has a checkable right answer: quoting the facts passes, and inventing a policy, an order status or a feature fails. The cases cover returns, shipping, sizes, payment, questions the facts don't answer (which should go to the support address), a French customer, a prompt injection and a request to leak the system prompt.
 
-Results from seed 7 (`bin/evalwright run examples/compare-models.yaml`), with seed 2024 alongside as a check:
+Results from seed 7 (`evalwright run examples/compare-models.yaml` in a clone), with seed 2024 alongside as a check:
 
 | Case | llama3.2:3b | qwen3:30b-a3b | What fails (examples from both seeds) |
 |---|---|---|---|
@@ -350,7 +353,7 @@ llama3.2 generates faster (99 against 76 tokens/s) and starts sooner, and here i
 
 ## Design notes
 
-- **Validate everything before calling a model.** Model names, prompt templates, assertions, seeds and duplicate case names are checked up front, for every suite file passed to `run`, and every problem is reported at once with line numbers. A typo in the last suite fails in milliseconds instead of 20 minutes into a run.
+- **Validate everything before calling a model.** Model names, prompt templates, assertions, seeds and duplicate case names are checked up front, for every suite file passed to `run`, so a typo in the last suite fails in milliseconds instead of 20 minutes into a run. Every file's problems are reported in one go. Within a file, seed, duplicate-name and assertion problems are listed together (assertions with their line number); a YAML syntax error, a malformed model name or a broken template is reported on its own, before the rest.
 - **A failed request fails the case, not the run.** One timeout shouldn't throw away the results you already have. Failed requests are counted under ERRORS and left out of the speed metrics; otherwise their zero latency would make an unreliable model look fast.
 - **Models are the outer loop.** Local models are slow to load, so each model handles all of its cases before the next model is loaded.
 - **Ctrl-C keeps partial results.** Cancellation goes through `context.Context`, which also aborts in-flight HTTP streams, and evalwright prints whatever finished and still writes it to `-o`. An interrupted run is reported as `INTERRUPTED`, never `PASS`.

@@ -31,7 +31,7 @@ services:
     environment:
       OLLAMA_HOST: http://ollama:11434
     extra_hosts:
-      - host.docker.internal:host-gateway # for the host's Ollama on Linux
+      - host.docker.internal:host-gateway # the host's Ollama on Linux; see the README
     volumes:
       - .:/work
     read_only: true
