@@ -12,7 +12,7 @@
 
 services:
   ollama:
-    image: ollama/ollama:0.40.10
+    image: ollama/ollama:0.40.11
     volumes:
       - ollama-models:/root/.ollama
     healthcheck:
