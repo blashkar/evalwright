@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"slices"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -60,6 +61,9 @@ func Table(w io.Writer, rep *runner.Report, gate *Gate) error {
 	}
 	writeComparison(w, rep.Compare())
 	if err := writeSpeed(w, summary); err != nil {
+		return err
+	}
+	if err := writeSampling(w, rep.Models); err != nil {
 		return err
 	}
 	if gate != nil {
@@ -313,6 +317,57 @@ func writeSpeed(w io.Writer, summary []runner.ModelSummary) error {
 			tokensPerSecond(m.TokensPerSecond), loadTime(m))
 	}
 	return tw.Flush()
+}
+
+// writeSampling shows the sampling settings each model used and marks those
+// the suite left to the model, since a model's own defaults differ from
+// another's and the comparison then isn't like for like.
+func writeSampling(w io.Writer, models []runner.ModelInfo) error {
+	var names []string
+	for _, name := range runner.SamplingOptions {
+		if slices.ContainsFunc(models, func(m runner.ModelInfo) bool { _, ok := m.Sampling[name]; return ok }) {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+
+	fmt.Fprintln(w)
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprint(tw, "MODEL")
+	for _, name := range names {
+		fmt.Fprint(tw, "\t"+strings.ToUpper(name))
+	}
+	fmt.Fprintln(tw)
+	fromModel, unset := false, false
+	for _, m := range models {
+		fmt.Fprint(tw, m.Model)
+		for _, name := range names {
+			s, ok := m.Sampling[name]
+			switch {
+			case !ok:
+				fmt.Fprint(tw, "\t-")
+				unset = true
+			case s.From == "model":
+				fmt.Fprintf(tw, "\t%v*", s.Value)
+				fromModel = true
+			default:
+				fmt.Fprintf(tw, "\t%v", s.Value)
+			}
+		}
+		fmt.Fprintln(tw)
+	}
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	if fromModel {
+		fmt.Fprintln(w, "* the model's own default: the suite's options don't set it.")
+	}
+	if unset {
+		fmt.Fprintln(w, "- set by neither, so the engine's built-in default applies.")
+	}
+	return nil
 }
 
 func ms(d time.Duration) string {

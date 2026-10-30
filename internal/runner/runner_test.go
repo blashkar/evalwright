@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -262,7 +263,7 @@ func (p *lifecycleProvider) Prepare(_ context.Context, model string) (provider.M
 	if model == p.missing {
 		return provider.ModelInfo{}, errors.New("not installed")
 	}
-	return provider.ModelInfo{Digest: "digest-of-" + model}, nil
+	return provider.ModelInfo{Digest: "digest-of-" + model, Defaults: map[string]any{"temperature": 1.0, "top_k": 64.0, "num_ctx": 2048.0}}, nil
 }
 
 func (p *lifecycleProvider) Warm(ctx context.Context, model string, options map[string]any) (provider.LoadInfo, error) {
@@ -313,6 +314,22 @@ func TestRunPreparesAllModelsFirstThenWarmsEach(t *testing.T) {
 	}
 	if !slices.Equal(started, []string{"x:a", "x:b"}) {
 		t.Errorf("OnModel calls = %v", started)
+	}
+}
+
+func TestRunRecordsSampling(t *testing.T) {
+	r := Runner{Providers: provider.Registry{"x": &lifecycleProvider{}}}
+	s := mustParse(t, "name: s\nmodels: [x:a]\noptions: {temperature: 0.7, seed: 1}\nprompt: hi\ncases: [{assert: [{contains: hi}]}]\n")
+	rep, err := r.Run(context.Background(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The suite's temperature wins over the model's; top_k is the model's
+	// own. Options that aren't about sampling, like seed and num_ctx, are
+	// recorded elsewhere.
+	want := map[string]Setting{"temperature": {Value: 0.7, From: "suite"}, "top_k": {Value: 64.0, From: "model"}}
+	if got := rep.Models[0].Sampling; !reflect.DeepEqual(got, want) {
+		t.Errorf("Sampling = %v, want %v", got, want)
 	}
 }
 

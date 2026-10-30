@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -39,7 +40,8 @@ func (f *fakeOllama) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(w, `{"error":"model '%s' not found"}`, model)
 			return
 		}
-		fmt.Fprint(w, `{"details":{"family":"llama","parameter_size":"3.2B","quantization_level":"Q4_K_M"}}`)
+		fmt.Fprint(w, `{"details":{"family":"llama","parameter_size":"3.2B","quantization_level":"Q4_K_M"},`+
+			`"parameters":"temperature                    0.7\nstop                           \"<|eot_id|>\"\ntop_k                          20"}`)
 	case "/api/tags":
 		var models []map[string]string
 		for m := range f.installed {
@@ -168,8 +170,11 @@ func TestOllamaPrepare(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Prepare: %v", err)
 		}
-		want := ModelInfo{Digest: "digest-of-llama3.2:3b", Family: "llama", ParameterSize: "3.2B", Quantization: "Q4_K_M", Engine: "ollama 0.32.15"}
-		if info != want {
+		want := ModelInfo{
+			Digest: "digest-of-llama3.2:3b", Family: "llama", ParameterSize: "3.2B", Quantization: "Q4_K_M",
+			Defaults: map[string]any{"temperature": 0.7, "top_k": 20.0}, Engine: "ollama 0.32.15",
+		}
+		if !reflect.DeepEqual(info, want) {
 			t.Errorf("info = %+v, want %+v", info, want)
 		}
 		// A model named without a tag is installed as :latest.
@@ -224,6 +229,18 @@ func TestOllamaWarm(t *testing.T) {
 	}
 	if got, _ := loads[0]["options"].(map[string]any); got["num_ctx"] != float64(8192) {
 		t.Errorf("load options = %v, want num_ctx 8192", loads[0]["options"])
+	}
+}
+
+func TestParseParameters(t *testing.T) {
+	got := parseParameters("top_p                          0.95\nstop                           \"<end_of_turn>\"\n" +
+		"stop                           \"<eos>\"\ntemperature                    1\nnum_ctx 4096\nsystem \"You are helpful\"\n\nbroken\n")
+	want := map[string]any{"top_p": 0.95, "temperature": 1.0, "num_ctx": 4096.0, "system": "You are helpful"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("parseParameters = %v, want %v", got, want)
+	}
+	if got := parseParameters(""); got != nil {
+		t.Errorf("no parameters = %v, want nil", got)
 	}
 }
 

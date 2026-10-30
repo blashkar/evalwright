@@ -47,13 +47,17 @@ type Model struct {
 	// model, if known: the server's version, whether the model ran on the
 	// GPU or the CPU, its context window, and how many requests ran at
 	// once. A seed reproduces an answer only if they stay the same.
-	Engine          string        `json:"engine,omitempty"`
-	Processor       string        `json:"processor,omitempty"`
-	ContextLength   int           `json:"context_length,omitempty"`
-	Parallel        int           `json:"parallel,omitempty"`
-	LatencyP50      time.Duration `json:"latency_p50_ns,omitempty"`
-	TokensPerSecond float64       `json:"tokens_per_second,omitempty"`
-	Cases           []Case        `json:"cases"`
+	Engine        string `json:"engine,omitempty"`
+	Processor     string `json:"processor,omitempty"`
+	ContextLength int    `json:"context_length,omitempty"`
+	Parallel      int    `json:"parallel,omitempty"`
+	// Sampling records the sampling settings the model used, for the
+	// record. A change shows up elsewhere: in the suite's options, or as a
+	// new model build if the model's defaults changed.
+	Sampling        map[string]runner.Setting `json:"sampling,omitempty"`
+	LatencyP50      time.Duration             `json:"latency_p50_ns,omitempty"`
+	TokensPerSecond float64                   `json:"tokens_per_second,omitempty"`
+	Cases           []Case                    `json:"cases"`
 }
 
 // Case is one model's results on one case.
@@ -164,6 +168,7 @@ func fromReport(rep *runner.Report) Suite {
 			Processor:       loads[ms.Model].Processor,
 			ContextLength:   loads[ms.Model].ContextLength,
 			Parallel:        rep.Parallel,
+			Sampling:        infos[ms.Model].Sampling,
 			LatencyP50:      ms.LatencyP50,
 			TokensPerSecond: ms.TokensPerSecond,
 		}

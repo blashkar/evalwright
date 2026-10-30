@@ -64,6 +64,43 @@ type Report struct {
 type ModelInfo struct {
 	Model string `json:"model"`
 	provider.ModelInfo
+	// Sampling is the sampling settings the model used, from the suite's
+	// options or, where the suite doesn't set one, the model's defaults. A
+	// setting neither sets is left out: the engine's built-in default
+	// applied, which depends on the engine's version.
+	Sampling map[string]Setting `json:"sampling,omitempty"`
+}
+
+// Setting is the value of one sampling setting, and where it came from.
+type Setting struct {
+	Value any `json:"value"`
+	// From is "suite" if the suite set it, or "model" if it is the model's
+	// own default.
+	From string `json:"from"`
+}
+
+// SamplingOptions are the options that decide how a model picks each
+// token, in the order reports list them.
+var SamplingOptions = []string{
+	"temperature", "top_k", "top_p", "min_p", "typical_p",
+	"repeat_penalty", "repeat_last_n", "presence_penalty", "frequency_penalty",
+}
+
+// sampling returns the sampling settings a model with the given defaults
+// uses when sent options.
+func sampling(options, defaults map[string]any) map[string]Setting {
+	out := map[string]Setting{}
+	for _, name := range SamplingOptions {
+		if v, ok := options[name]; ok {
+			out[name] = Setting{Value: v, From: "suite"}
+		} else if v, ok := defaults[name]; ok {
+			out[name] = Setting{Value: v, From: "model"}
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // ModelLoad is how one model was loaded into memory, and how long it took.
@@ -176,7 +213,7 @@ func (r *Runner) prepare(ctx context.Context, s *suite.Suite) ([]target, []prepa
 				errs = append(errs, fmt.Errorf("model %q: %w", t.spec, err))
 				continue
 			}
-			models = append(models, ModelInfo{Model: t.spec, ModelInfo: info})
+			models = append(models, ModelInfo{Model: t.spec, ModelInfo: info, Sampling: sampling(s.Options, info.Defaults)})
 		}
 	}
 	if err := errors.Join(errs...); err != nil {

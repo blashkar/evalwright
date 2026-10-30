@@ -264,10 +264,12 @@ func TestCompareSameInputsDifferentAnswers(t *testing.T) {
 func TestCompareRuntime(t *testing.T) {
 	rep := report(map[string]run{"m": {"a": 5, "b": 5}}, "m")
 	rep.Models[0].Engine = "ollama 0.31.0"
+	rep.Models[0].Sampling = map[string]runner.Setting{"temperature": {Value: 0.7, From: "suite"}}
 	rep.Loads = []runner.ModelLoad{{Model: "m", LoadInfo: provider.LoadInfo{Processor: "100% GPU", ContextLength: 4096}}}
 	rep.Parallel = 1
 	base := baselineOf(t, rep)
-	if m := base.Suites[0].Models[0]; m.Engine != "ollama 0.31.0" || m.Processor != "100% GPU" || m.ContextLength != 4096 || m.Parallel != 1 {
+	if m := base.Suites[0].Models[0]; m.Engine != "ollama 0.31.0" || m.Processor != "100% GPU" || m.ContextLength != 4096 || m.Parallel != 1 ||
+		m.Sampling["temperature"].Value != 0.7 {
 		t.Fatalf("baseline model = %+v, want the runtime recorded", m)
 	}
 

@@ -76,6 +76,11 @@ type ModelInfo struct {
 	Family        string `json:"family,omitempty"`
 	ParameterSize string `json:"parameter_size,omitempty"`
 	Quantization  string `json:"quantization,omitempty"`
+	// Defaults are the model's own values for options a request doesn't
+	// set, such as {"temperature": 0.7, "top_k": 20}. Models ship with
+	// different defaults, so two models asked the same way can sample
+	// differently.
+	Defaults map[string]any `json:"defaults,omitempty"`
 	// Engine is the server software and its version, e.g. "ollama 0.32.15".
 	// A seed only reproduces an answer on the same engine: a new version
 	// can compute the same model's probabilities slightly differently.

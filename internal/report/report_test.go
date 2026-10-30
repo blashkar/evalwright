@@ -187,6 +187,45 @@ func TestTablePerCaseAndComparison(t *testing.T) {
 	}
 }
 
+func TestTableSampling(t *testing.T) {
+	rep := &runner.Report{
+		Suite: "sampling",
+		Models: []runner.ModelInfo{
+			{Model: "ollama:a", Sampling: map[string]runner.Setting{
+				"temperature": {Value: 0.7, From: "suite"}, "top_k": {Value: 20.0, From: "model"},
+			}},
+			{Model: "ollama:b", Sampling: map[string]runner.Setting{"temperature": {Value: 0.7, From: "suite"}}},
+		},
+		Results: []runner.Result{{Case: "c", Model: "ollama:a", Sample: 1, Pass: true}},
+	}
+	var buf bytes.Buffer
+	if err := Table(&buf, rep, nil); err != nil {
+		t.Fatal(err)
+	}
+	got := buf.String()
+	for _, want := range []string{
+		"MODEL     TEMPERATURE  TOP_K\n",
+		"ollama:a  0.7          20*\n",
+		"ollama:b  0.7          -\n",
+		"* the model's own default",
+		"- set by neither",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("output missing %q:\n%s", want, got)
+		}
+	}
+
+	// Nothing to show for providers that don't report settings.
+	rep.Models = nil
+	buf.Reset()
+	if err := Table(&buf, rep, nil); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(buf.String(), "TEMPERATURE") {
+		t.Errorf("sampling table without settings:\n%s", buf.String())
+	}
+}
+
 func TestTableSpeed(t *testing.T) {
 	rep := &runner.Report{
 		Suite: "speed",

@@ -124,6 +124,7 @@ LLM output varies, so `samples: N` runs each case N times and reports a pass rat
 
 - **Each sample gets its own seed.** If the suite sets `seed: 7`, samples use seeds 7, 8, 9, … . A single fixed seed would make every sample an identical copy, and a 100% pass rate over copies measures nothing. The seed each sample used is saved in the JSON results, so any answer can be reproduced on the same setup (see below). Seeds must be between 0 and 4294967295: Ollama treats -1 as "random", and models only use 32-bit seeds.
 - **Use a sampling temperature.** At `temperature: 0` the model always picks its most likely token, so every sample is the same; evalwright warns if a suite combines that with `samples` > 1. Even 0.2 gives near-identical answers in practice. 0.7 is a realistic chat setting.
+- **Set it in the suite.** evalwright passes `options` through and never picks a temperature itself. Without one, each model uses the default it ships with, and those differ: on one machine, gemma3:4b used 1, qwen3:4b-instruct 0.7, and llama3.2:3b none of its own, so Ollama's built-in default applied. A comparison would then partly measure the setting rather than the model, so evalwright warns when a suite with several models or samples leaves `temperature` out. The same goes for `top_k` and `top_p`, which drop unlikely tokens before the draw (`top_k: 20` keeps the 20 likeliest; `top_p: 0.8` keeps the likeliest tokens until they add up to 80%): set them too if models should sample alike.
 
 #### What a seed does and doesn't fix
 
@@ -138,6 +139,7 @@ So a seed reproduces an answer only when the model build, the engine and the run
 | Processor | where the model was loaded, as `ollama ps` shows it | `100% GPU`, `100% CPU`, `25%/75% CPU/GPU` |
 | Context length | the context window it was loaded with | `131072` |
 | Parallel | `--parallel` | `1` |
+| Sampling | the suite's options, or the model's own defaults for those it doesn't set | `temperature 0.7 (suite)`, `top_k 20 (model)` |
 
 It can't see everything: a different GPU of the same kind, the server's own settings (`OLLAMA_NUM_PARALLEL`, flash attention, KV-cache type) or other programs using the server at the same time. The baseline gate doesn't depend on any of this being complete, because it checks whether answers repeated rather than assuming they did; see [Catching regressions with a baseline](#catching-regressions-with-a-baseline).
 
@@ -180,7 +182,7 @@ It can't see everything: a different GPU of the same kind, the server's own sett
 
 ### Reading the report
 
-After the per-request rows and the failures, evalwright prints these summaries, each only when it applies: **Passed, by case**, **Quality**, **Comparison** and **Speed**, then, with `--baseline`, **Compared with the baseline** (see [Catching regressions with a baseline](#catching-regressions-with-a-baseline)) and the reasons a run failed.
+After the per-request rows and the failures, evalwright prints these summaries, each only when it applies: **Passed, by case**, **Quality**, **Comparison**, **Speed** and **Sampling**, then, with `--baseline`, **Compared with the baseline** (see [Catching regressions with a baseline](#catching-regressions-with-a-baseline)) and the reasons a run failed.
 
 **Passed, by case** (shown when a suite has several models or samples) counts passes per case and model, with each count's 95% interval when cases have several samples. An overall pass rate can hide a model that fails one kind of case every time; this table shows where the failures are.
 
@@ -218,6 +220,15 @@ LLM evaluation results are noisy, and the most common mistake is to read a diffe
 Only requests that got an answer count toward the speed columns, and `-` means a value wasn't measured (the mock provider reports no tokens, for example). Every request's metrics, and each model's load time, are also saved in the `-o` JSON.
 
 **Prompt caching:** Ollama caches the processed prompt, so only new text has to be read. In the compare suite below, llama3.2:3b took about a quarter of a second to read the suite's first prompt (195 and 261 ms in two runs), about 42 ms for each later case's first sample (the shared system prompt was cached), and about 11 ms for repeated samples (the whole prompt was cached). That is why FIRST TOKEN P50 is much lower than a cold request's. The effect is the same for every model, so comparisons stay fair.
+
+**Sampling** (shown when the provider reports it) lists each model's sampling settings. A value marked `*` is the model's own default, because the suite doesn't set it; `-` means neither does, so the engine's built-in default applies. Marks in a comparison mean the models didn't sample alike:
+
+```
+MODEL                                 TEMPERATURE  TOP_K  TOP_P  REPEAT_PENALTY
+ollama:llama3.2:3b                    0.7          -      -      -
+ollama:gemma3:4b                      0.7          64*    0.95*  -
+ollama:qwen3:4b-instruct-2507-q4_K_M  0.7          20*    0.8*   1*
+```
 
 ## Two jobs: choosing a model, and catching regressions
 

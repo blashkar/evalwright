@@ -124,7 +124,11 @@ func (c *Client) List(ctx context.Context) ([]Model, error) {
 type ShowResponse struct {
 	Details      ModelDetails `json:"details"`
 	Capabilities []string     `json:"capabilities"`
-	ModifiedAt   time.Time    `json:"modified_at"`
+	// Parameters are the model's own defaults for options a request
+	// doesn't set, such as temperature and top_k, one "name value" per
+	// line, as in its Modelfile.
+	Parameters string    `json:"parameters"`
+	ModifiedAt time.Time `json:"modified_at"`
 }
 
 // Show returns details about model. If the model is not installed, the

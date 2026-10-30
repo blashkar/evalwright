@@ -282,10 +282,19 @@ func (s *Suite) SetSamples(n int) error {
 // intended, such as sampling a model whose output can't vary.
 func (s *Suite) Warnings() []string {
 	var warns []string
-	if t, ok := number(s.Options["temperature"]); ok && t == 0 && s.Samples > 1 {
+	t, set := number(s.Options["temperature"])
+	if set && t == 0 && s.Samples > 1 {
 		warns = append(warns, fmt.Sprintf(
 			"samples is %d but options.temperature is 0, so every sample gives the same answer; "+
 				"raise the temperature (e.g. 0.7) to measure how answers vary, or use samples: 1", s.Samples))
+	}
+	// A single answer is what it is, but a pass rate or a comparison
+	// depends on how the answers were sampled.
+	if !set && (s.Samples > 1 || len(s.Models) > 1) {
+		warns = append(warns,
+			"options.temperature isn't set, so each model samples at its own default, and defaults differ between models "+
+				"and can change with a new build; set it, e.g. options: {temperature: 0.7}. "+
+				"The report's Sampling table shows the settings each model used")
 	}
 	return warns
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"strconv"
 	"strings"
 	"time"
 
@@ -81,6 +82,7 @@ func (o *Ollama) Prepare(ctx context.Context, model string) (ModelInfo, error) {
 		Family:        show.Details.Family,
 		ParameterSize: show.Details.ParameterSize,
 		Quantization:  show.Details.QuantizationLevel,
+		Defaults:      parseParameters(show.Parameters),
 	}
 
 	// /api/show doesn't report the digest; the list of installed models does.
@@ -101,6 +103,32 @@ func (o *Ollama) Prepare(ctx context.Context, model string) (ModelInfo, error) {
 	}
 	info.Engine = "ollama " + version
 	return info, nil
+}
+
+// parseParameters reads a model's default options from /api/show, one
+// "name value" per line. Numbers are returned as float64 and other values
+// as strings. stop, which lists the tokens that end an answer and can
+// repeat, isn't an option evalwright reports, so it is skipped.
+func parseParameters(text string) map[string]any {
+	out := map[string]any{}
+	for line := range strings.Lines(text) {
+		name, value, ok := strings.Cut(strings.TrimSpace(line), " ")
+		value = strings.TrimSpace(value)
+		if !ok || name == "stop" || value == "" {
+			continue
+		}
+		if f, err := strconv.ParseFloat(value, 64); err == nil {
+			out[name] = f
+		} else if s, err := strconv.Unquote(value); err == nil {
+			out[name] = s
+		} else {
+			out[name] = value
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // sameModel reports whether name, as the server lists it, is model. Like
