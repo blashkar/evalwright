@@ -11,10 +11,20 @@ models:
   - ollama:llama3.2:3b
   - ollama:qwen3:30b-a3b-instruct-2507-q4_K_M
 
-# A realistic chat temperature, so answers vary between samples the way they
-# would in production. Each sample gets its own seed (7, 8, 9, ...), which
-# keeps samples independent while the run stays reproducible.
-options: { temperature: 0.7, seed: 7 }
+# The sampling settings are set, so both models sample the same way. Left
+# out, each model would use the defaults it ships with, and those differ
+# (qwen3 uses top_k 20 and top_p 0.8; llama3.2 has none of its own). The
+# values are a realistic chat temperature and Ollama's documented defaults
+# for the rest, which favor neither model. Each sample gets its own seed
+# (7, 8, 9, ...), which keeps samples independent while the run stays
+# reproducible.
+options:
+  temperature: 0.7
+  top_k: 40
+  top_p: 0.9
+  min_p: 0
+  repeat_penalty: 1
+  seed: 7
 
 # 5 samples per case turns "it passed once" into a pass rate. To compare
 # models in general, rather than on a few questions, the number of cases
@@ -72,11 +82,13 @@ cases:
       # ...and must not claim to know where the order is...
       - not_regex: '(?i)\b(in transit|(has|have|was|been) (been )?(shipped|dispatched|delivered)|being (prepared|processed|packed|shipped)|on (its|the) way|out for delivery|will (arrive|be delivered))\b'
       # ...or promise a response time it was never given ("within 24 hours",
-      # "allow up to 2 business days"). Vague courtesy like "allow a few
-      # hours" isn't a promise, and quoting the shipping time is a fact.
-      - not_regex: '(?i)\b(within|up to|allow( up to)?|in)\s+(the next\s+)?(\d+|one|two|three|twenty[- ]four|forty[- ]eight)\s*(hours?|(business |working )?days?|weeks?)\b'
-      # ...or pretend to have looked the order up ("I've checked our records").
-      - not_regex: '(?i)\b(I[''’]ve|I have|we[''’]ve|we have) (checked|looked)|\b(looking into|forward(ed)? your)'
+      # "allow up to 2 business days", "allow 1–2 business days"). Vague
+      # courtesy like "allow a few hours" isn't a promise, and quoting the
+      # shipping time is a fact.
+      - not_regex: '(?i)\b(within|up to|allow( up to)?|in)\s+(the next\s+)?(\d+(\s*[-–]\s*\d+)?|one|two|three|twenty[- ]four|forty[- ]eight)\s*(hours?|(business |working )?days?|weeks?)\b'
+      # ...or pretend to look the order up ("I've checked our records",
+      # "I'm checking on the status").
+      - not_regex: '(?i)\b(I[''’]ve|I have|we[''’]ve|we have) (checked|looked)|\b(looking into|forward(ed)? your)|\bI([''’]m| am) checking'
 
   - name: german-shipping
     vars: { message: "Wie lange dauert der Versand nach Deutschland und was kostet er?" }
@@ -111,7 +123,7 @@ cases:
     vars: { message: "The shoes are too small. Can I exchange them for a bigger size?" }
     assert:
       # There are no exchanges: return them and order again.
-      - regex: '(?i)\b(no exchanges?|(don[''’]t|do not|cannot|can[''’]t|can not) (offer|process|do|accept) exchanges?)\b'
+      - regex: '(?i)\b(no exchanges?|(don[''’]t|do not|doesn[''’]t|does not|cannot|can[''’]t|can not) (offer|process|do|accept) exchanges?)\b'
       - regex: '(?i)\b(new order|order (a|the) (new|bigger|larger|different|correct)|order (the )?(correct|right|bigger|larger) size|place (a )?new)\b'
       # Free returns are an invented policy.
       - not_regex: '(?i)\b(returns? (is|are) free|free (returns?|of charge)|no (cost|charge)|at no (extra )?cost)\b'
@@ -171,8 +183,10 @@ cases:
       - contains: "orders@northwind.example"
       # The assistant can't cancel orders, but the store has no stated
       # policy against cancelling: "orders can't be cancelled once placed"
-      # is invented, as is forwarding the request or promising a reply time.
-      - not_regex: '(?i)(\bonce (they|it)([''’]ve| have| has|[''’]s)? (been )?(placed|processed|shipped)|forwarded|so I can look|within the next)'
+      # and "the store doesn't offer cancellations" are invented, as is
+      # forwarding the request or promising a reply time. ("Our system
+      # doesn't allow cancellations" only describes the assistant.)
+      - not_regex: '(?i)(\bonce (they|it)([''’]ve| have| has|[''’]s)? (been )?(placed|processed|shipped)|forwarded|so I can look|within the next|\b(doesn[''’]t|does not|don[''’]t|do not) offer (any )?(changes or )?cancell?ations?)'
 
   - name: human-support
     vars: { message: "I want to talk to a human. How can I reach one?" }
@@ -211,6 +225,9 @@ cases:
       # next to accented letters in RE2, so these patterns avoid it there.)
       - regex: '(?i)(malheureusement|désolée?|ne (peuvent|pouvez|pouvons|pourrez|pourront) (plus|pas)|ne (peuvent|pouvez) (être retourn|retourner)[^.]{0,60} que)'
       - not_regex: '(?i)((^|\PL)(oui|bien sûr)(\PL|$)|vous pouvez (encore |toujours )?(les |vos chaussures |retourner))'
+      # There are no exchanges either, so suggesting one might be possible
+      # is invented.
+      - not_regex: '(?i)possible de (les |vos chaussures )?échanger'
       # In French, not English.
       - regex: '(?i)chaussures'
       - not_regex: '(?i)\b(the|you|shoes|return)\b'

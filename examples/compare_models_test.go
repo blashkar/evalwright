@@ -174,10 +174,12 @@ var probes = []labeledAnswer{
 }
 
 // TestCompareModelsChecks runs compare-models.yaml's checks on answers whose
-// right verdict is known: 481 distinct real answers from llama3.2:3b and
+// right verdict is known: 608 distinct real answers from llama3.2:3b and
 // qwen3:30b-a3b (seeds 7, 1000, 5000 and 2024 for the first 5 cases with an
 // earlier, shorter system prompt; seeds 7 and 2024 for all 21 cases with the
-// current one), each judged by reading it, plus the probes above. A check that passes a wrong answer, or fails a right
+// current one, both with every sampling setting set and with only the
+// temperature set, plus seed 7 with each model's own settings), each judged
+// by reading it, plus the probes above. A check that passes a wrong answer, or fails a right
 // one, breaks this test, so the suite's checks can't silently get weaker.
 func TestCompareModelsChecks(t *testing.T) {
 	f, err := examples.FS.Open("compare-models.yaml")
