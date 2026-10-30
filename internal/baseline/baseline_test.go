@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blashkar/evalwright/internal/provider"
 	"github.com/blashkar/evalwright/internal/runner"
 	"github.com/blashkar/evalwright/internal/stats"
 	"github.com/blashkar/evalwright/internal/suite"
@@ -249,8 +250,84 @@ func TestCompareSameInputsDifferentAnswers(t *testing.T) {
 	base := baselineOf(t, report(map[string]run{"m": {"a": 5}}, "m"))
 	now := report(map[string]run{"m": {"a": 5}}, "m")
 	now.Results[0].Output = "yes!"
-	if c := Compare(base, now).Cases[0]; c.Status != Unchanged || len(c.Changes) != 0 {
+	cmp := Compare(base, now)
+	if c := cmp.Cases[0]; c.Status != Unchanged || len(c.Changes) != 0 {
 		t.Errorf("case = %+v, want unchanged with no input changes", c)
+	}
+	// Nothing recorded changed, yet the seeded answers did: the run didn't
+	// reproduce the baseline, and the report should say so.
+	if m := cmp.Models[0]; m.Reproducible != 1 || m.Reproduced != 0 {
+		t.Errorf("reproduced %d of %d, want 0 of 1", m.Reproduced, m.Reproducible)
+	}
+}
+
+func TestCompareRuntime(t *testing.T) {
+	rep := report(map[string]run{"m": {"a": 5, "b": 5}}, "m")
+	rep.Models[0].Engine = "ollama 0.31.0"
+	rep.Models[0].Sampling = map[string]runner.Setting{"temperature": {Value: 0.7, From: "suite"}}
+	rep.Loads = []runner.ModelLoad{{Model: "m", LoadInfo: provider.LoadInfo{Processor: "100% GPU", ContextLength: 4096}}}
+	rep.Parallel = 1
+	base := baselineOf(t, rep)
+	if m := base.Suites[0].Models[0]; m.Engine != "ollama 0.31.0" || m.Processor != "100% GPU" || m.ContextLength != 4096 || m.Parallel != 1 ||
+		m.Sampling["temperature"].Value != 0.7 {
+		t.Fatalf("baseline model = %+v, want the runtime recorded", m)
+	}
+
+	t.Run("same", func(t *testing.T) {
+		m := Compare(base, rep).Models[0]
+		if len(m.Runtime) != 0 || m.Reproducible != 2 || m.Reproduced != 2 {
+			t.Errorf("model = %+v, want no runtime changes and both cases reproduced", m)
+		}
+	})
+
+	t.Run("changed", func(t *testing.T) {
+		now := report(map[string]run{"m": {"a": 5, "b": 5}}, "m")
+		now.Models[0].Engine = "ollama 0.32.15"
+		now.Loads = []runner.ModelLoad{{Model: "m", LoadInfo: provider.LoadInfo{Processor: "100% CPU", ContextLength: 4096}}}
+		now.Parallel = 2
+		cmp := Compare(base, now)
+
+		want := []RuntimeChange{
+			{What: "engine", Now: "ollama 0.32.15", Base: "ollama 0.31.0"},
+			{What: "processor", Now: "100% CPU", Base: "100% GPU"},
+			{What: "parallel", Now: "2", Base: "1"},
+		}
+		m := cmp.Models[0]
+		if !slices.Equal(m.Runtime, want) {
+			t.Errorf("runtime = %+v, want %+v", m.Runtime, want)
+		}
+		// Every case ran on a different runtime, so none can count as a
+		// repeat of the baseline, even with the same answers.
+		if m.Reproducible != 0 {
+			t.Errorf("reproducible = %d, want 0", m.Reproducible)
+		}
+		for _, c := range cmp.Cases {
+			if c.Status != Unchanged || !slices.Equal(c.Changes, []string{"engine", "runtime"}) {
+				t.Errorf("%s: %s, changes %v; want unchanged, changes [engine runtime]", c.Case, c.Status, c.Changes)
+			}
+		}
+	})
+
+	t.Run("not recorded", func(t *testing.T) {
+		// A baseline from before evalwright recorded the runtime has none,
+		// which isn't a change.
+		old := baselineOf(t, report(map[string]run{"m": {"a": 5, "b": 5}}, "m"))
+		old.Suites[0].Models[0].Parallel = 0
+		if m := Compare(old, rep).Models[0]; len(m.Runtime) != 0 {
+			t.Errorf("runtime = %+v, want none", m.Runtime)
+		}
+	})
+}
+
+func TestCompareWithoutSeeds(t *testing.T) {
+	// Without seeds answers aren't expected to repeat, so they don't count
+	// toward reproduction.
+	rep := report(map[string]run{"m": {"a": 5}}, "m")
+	for i := range rep.Results {
+		rep.Results[i].Seed = nil
+	}
+	if m := Compare(baselineOf(t, rep), rep).Models[0]; m.Reproducible != 0 {
+		t.Errorf("reproducible = %d, want 0", m.Reproducible)
 	}
 }
 

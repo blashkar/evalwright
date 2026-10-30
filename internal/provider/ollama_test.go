@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -39,11 +40,25 @@ func (f *fakeOllama) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(w, `{"error":"model '%s' not found"}`, model)
 			return
 		}
-		fmt.Fprint(w, `{"details":{"family":"llama","parameter_size":"3.2B","quantization_level":"Q4_K_M"}}`)
+		fmt.Fprint(w, `{"details":{"family":"llama","parameter_size":"3.2B","quantization_level":"Q4_K_M"},`+
+			`"parameters":"temperature                    0.7\nstop                           \"<|eot_id|>\"\ntop_k                          20"}`)
 	case "/api/tags":
 		var models []map[string]string
 		for m := range f.installed {
 			models = append(models, map[string]string{"name": m, "digest": "digest-of-" + m})
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"models": models})
+	case "/api/version":
+		fmt.Fprint(w, `{"version":"0.32.15"}`)
+	case "/api/ps":
+		// Loaded models are listed by their full name, with the tag.
+		var models []map[string]any
+		for _, l := range f.loads {
+			name, _ := l["model"].(string)
+			if !strings.Contains(name, ":") {
+				name += ":latest"
+			}
+			models = append(models, map[string]any{"name": name, "size": 4000, "size_vram": 3000, "context_length": 8192})
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"models": models})
 	case "/api/pull":
@@ -155,8 +170,11 @@ func TestOllamaPrepare(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Prepare: %v", err)
 		}
-		want := ModelInfo{Digest: "digest-of-llama3.2:3b", Family: "llama", ParameterSize: "3.2B", Quantization: "Q4_K_M"}
-		if info != want {
+		want := ModelInfo{
+			Digest: "digest-of-llama3.2:3b", Family: "llama", ParameterSize: "3.2B", Quantization: "Q4_K_M",
+			Defaults: map[string]any{"temperature": 0.7, "top_k": 20.0}, Engine: "ollama 0.32.15",
+		}
+		if !reflect.DeepEqual(info, want) {
 			t.Errorf("info = %+v, want %+v", info, want)
 		}
 		// A model named without a tag is installed as :latest.
@@ -197,8 +215,13 @@ func TestOllamaWarm(t *testing.T) {
 	// num_ctx changes how a model is loaded, so the load must use the
 	// suite's options or Ollama would reload the model on the first case.
 	opts := map[string]any{"num_ctx": 8192}
-	if err := (&Ollama{Client: client}).Warm(context.Background(), "m", opts); err != nil {
+	info, err := (&Ollama{Client: client}).Warm(context.Background(), "m", opts)
+	if err != nil {
 		t.Fatalf("Warm: %v", err)
+	}
+	// Where the model runs can change its answers, so Warm reports it.
+	if want := (LoadInfo{Processor: "25%/75% CPU/GPU", ContextLength: 8192}); info != want {
+		t.Errorf("info = %+v, want %+v", info, want)
 	}
 	loads := fake.loaded()
 	if len(loads) != 1 || loads[0]["model"] != "m" {
@@ -206,6 +229,35 @@ func TestOllamaWarm(t *testing.T) {
 	}
 	if got, _ := loads[0]["options"].(map[string]any); got["num_ctx"] != float64(8192) {
 		t.Errorf("load options = %v, want num_ctx 8192", loads[0]["options"])
+	}
+}
+
+func TestParseParameters(t *testing.T) {
+	got := parseParameters("top_p                          0.95\nstop                           \"<end_of_turn>\"\n" +
+		"stop                           \"<eos>\"\ntemperature                    1\nnum_ctx 4096\nsystem \"You are helpful\"\n\nbroken\n")
+	want := map[string]any{"top_p": 0.95, "temperature": 1.0, "num_ctx": 4096.0, "system": "You are helpful"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("parseParameters = %v, want %v", got, want)
+	}
+	if got := parseParameters(""); got != nil {
+		t.Errorf("no parameters = %v, want nil", got)
+	}
+}
+
+func TestProcessor(t *testing.T) {
+	for _, tc := range []struct {
+		size, vram int64
+		want       string
+	}{
+		{4000, 4000, "100% GPU"},
+		{4000, 0, "100% CPU"},
+		{4000, 1000, "75%/25% CPU/GPU"},
+		{0, 0, ""},     // not reported
+		{100, 200, ""}, // inconsistent
+	} {
+		if got := processor(tc.size, tc.vram); got != tc.want {
+			t.Errorf("processor(%d, %d) = %q, want %q", tc.size, tc.vram, got, tc.want)
+		}
 	}
 }
 

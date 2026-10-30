@@ -155,6 +155,21 @@ func TestRunPrintsSuiteWarningsEvenWhenQuiet(t *testing.T) {
 	}
 }
 
+func TestRunWarnsAboutParallelWithBaseline(t *testing.T) {
+	saved := filepath.Join(t.TempDir(), "base.json")
+	_, stderr, err := execute(t, "run", "../../examples/offline.yaml", "-q", "--parallel", "2", "--save-baseline", saved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stderr, "warning: --parallel 2 with a baseline") {
+		t.Errorf("stderr missing --parallel warning:\n%s", stderr)
+	}
+	// Without a baseline nothing is compared, so there is nothing to warn about.
+	if _, stderr, _ := execute(t, "run", "../../examples/offline.yaml", "-q", "--parallel", "2"); strings.Contains(stderr, "warning") {
+		t.Errorf("unexpected warning without a baseline:\n%s", stderr)
+	}
+}
+
 func TestRunChecksEverySuiteBeforeRunningAny(t *testing.T) {
 	bad := writeSuite(t, "name: x\nmodels: [mock:echo]\nprompt: hi\ncases: [{assert: [{contans: hi}]}]\n")
 	resultsPath := filepath.Join(t.TempDir(), "results.json")

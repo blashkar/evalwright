@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
+	"strconv"
 	"strings"
 	"time"
 
@@ -59,7 +61,7 @@ func (o *Ollama) Generate(ctx context.Context, req Request) (Response, error) {
 
 // Prepare implements Preparer. It checks that model is installed and, if
 // AutoPull is set, downloads it when it isn't. It returns the model's
-// digest, size and quantization.
+// digest, size and quantization, and the server's version.
 func (o *Ollama) Prepare(ctx context.Context, model string) (ModelInfo, error) {
 	show, err := o.Client.Show(ctx, model)
 	if err != nil {
@@ -80,6 +82,7 @@ func (o *Ollama) Prepare(ctx context.Context, model string) (ModelInfo, error) {
 		Family:        show.Details.Family,
 		ParameterSize: show.Details.ParameterSize,
 		Quantization:  show.Details.QuantizationLevel,
+		Defaults:      parseParameters(show.Parameters),
 	}
 
 	// /api/show doesn't report the digest; the list of installed models does.
@@ -88,12 +91,50 @@ func (o *Ollama) Prepare(ctx context.Context, model string) (ModelInfo, error) {
 		return ModelInfo{}, err
 	}
 	for _, m := range models {
-		if m.Name == model || m.Name == model+":latest" {
+		if sameModel(m.Name, model) {
 			info.Digest = m.Digest
 			break
 		}
 	}
+
+	version, err := o.Client.Version(ctx)
+	if err != nil {
+		return ModelInfo{}, err
+	}
+	info.Engine = "ollama " + version
 	return info, nil
+}
+
+// parseParameters reads a model's default options from /api/show, one
+// "name value" per line. Numbers are returned as float64 and other values
+// as strings. stop, which lists the tokens that end an answer and can
+// repeat, isn't an option evalwright reports, so it is skipped.
+func parseParameters(text string) map[string]any {
+	out := map[string]any{}
+	for line := range strings.Lines(text) {
+		name, value, ok := strings.Cut(strings.TrimSpace(line), " ")
+		value = strings.TrimSpace(value)
+		if !ok || name == "stop" || value == "" {
+			continue
+		}
+		if f, err := strconv.ParseFloat(value, 64); err == nil {
+			out[name] = f
+		} else if s, err := strconv.Unquote(value); err == nil {
+			out[name] = s
+		} else {
+			out[name] = value
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// sameModel reports whether name, as the server lists it, is model. Like
+// Ollama, a model named without a tag means its :latest tag.
+func sameModel(name, model string) bool {
+	return name == model || name == model+":latest"
 }
 
 func (o *Ollama) pull(ctx context.Context, model string) error {
@@ -116,9 +157,39 @@ func (o *Ollama) pull(ctx context.Context, model string) error {
 	})
 }
 
-// Warm implements Warmer.
-func (o *Ollama) Warm(ctx context.Context, model string, options map[string]any) error {
-	return o.Client.Load(ctx, model, options)
+// Warm implements Warmer. It loads model, then asks the server where it
+// put it.
+func (o *Ollama) Warm(ctx context.Context, model string, options map[string]any) (LoadInfo, error) {
+	if err := o.Client.Load(ctx, model, options); err != nil {
+		return LoadInfo{}, err
+	}
+	// The model is loaded and its cases can run, so a failure to describe
+	// it only leaves the description empty.
+	running, err := o.Client.Running(ctx)
+	if err != nil {
+		return LoadInfo{}, nil
+	}
+	for _, m := range running {
+		if sameModel(m.Name, model) {
+			return LoadInfo{Processor: processor(m.Size, m.SizeVRAM), ContextLength: m.ContextLength}, nil
+		}
+	}
+	return LoadInfo{}, nil
+}
+
+// processor describes where a model of size bytes, sizeVRAM of them in GPU
+// memory, runs, in the same words as `ollama ps`.
+func processor(size, sizeVRAM int64) string {
+	switch {
+	case size <= 0 || sizeVRAM < 0 || sizeVRAM > size:
+		return ""
+	case sizeVRAM == 0:
+		return "100% CPU"
+	case sizeVRAM == size:
+		return "100% GPU"
+	}
+	cpu := int(math.Round(float64(size-sizeVRAM) / float64(size) * 100))
+	return fmt.Sprintf("%d%%/%d%% CPU/GPU", cpu, 100-cpu)
 }
 
 func (o *Ollama) logf(format string, args ...any) {

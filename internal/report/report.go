@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"slices"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -62,6 +63,9 @@ func Table(w io.Writer, rep *runner.Report, gate *Gate) error {
 	if err := writeSpeed(w, summary); err != nil {
 		return err
 	}
+	if err := writeSampling(w, rep.Models); err != nil {
+		return err
+	}
 	if gate != nil {
 		if err := writeBaseline(w, gate.Baseline); err != nil {
 			return err
@@ -115,6 +119,13 @@ func writeBaseline(w io.Writer, cmp *baseline.Comparison) error {
 		}
 		if m.BuildChanged() {
 			fmt.Fprintf(w, "    model build changed: %s, was %s\n", short(m.Digest), short(m.BaseDigest))
+		}
+		for _, c := range m.Runtime {
+			fmt.Fprintf(w, "    %s changed: %s, was %s\n", c.What, c.Now, c.Base)
+		}
+		if n := m.Reproducible - m.Reproduced; n > 0 {
+			fmt.Fprintf(w, "    %d of %d cases gave different answers with the same inputs, seeds, model build and runtime, so they are tested too. A seed repeats an answer only if everything that computes it is the same: likely causes are --parallel above 1, other programs using the server, or a server change evalwright doesn't record, such as its hardware or settings.\n",
+				n, m.Reproducible)
 		}
 		if inc, ok := m.LatencyIncrease(); ok {
 			fmt.Fprintf(w, "    median latency %s, was %s (%+.0f%%)\n",
@@ -171,7 +182,9 @@ func changes(c baseline.CaseResult) string {
 	case c.Status == baseline.New || c.Status == baseline.Removed:
 		return "-"
 	case len(c.Changes) == 0:
-		return "answers only" // same inputs, so the model or server answered differently
+		// Nothing evalwright records changed, yet the answers did: sampling
+		// that isn't deterministic, or a change to the server it can't see.
+		return "answers only"
 	default:
 		return strings.Join(c.Changes, ", ")
 	}
@@ -304,6 +317,57 @@ func writeSpeed(w io.Writer, summary []runner.ModelSummary) error {
 			tokensPerSecond(m.TokensPerSecond), loadTime(m))
 	}
 	return tw.Flush()
+}
+
+// writeSampling shows the sampling settings each model used and marks those
+// the suite left to the model, since a model's own defaults differ from
+// another's and the comparison then isn't like for like.
+func writeSampling(w io.Writer, models []runner.ModelInfo) error {
+	var names []string
+	for _, name := range runner.SamplingOptions {
+		if slices.ContainsFunc(models, func(m runner.ModelInfo) bool { _, ok := m.Sampling[name]; return ok }) {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+
+	fmt.Fprintln(w)
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprint(tw, "MODEL")
+	for _, name := range names {
+		fmt.Fprint(tw, "\t"+strings.ToUpper(name))
+	}
+	fmt.Fprintln(tw)
+	fromModel, unset := false, false
+	for _, m := range models {
+		fmt.Fprint(tw, m.Model)
+		for _, name := range names {
+			s, ok := m.Sampling[name]
+			switch {
+			case !ok:
+				fmt.Fprint(tw, "\t-")
+				unset = true
+			case s.From == "model":
+				fmt.Fprintf(tw, "\t%v*", s.Value)
+				fromModel = true
+			default:
+				fmt.Fprintf(tw, "\t%v", s.Value)
+			}
+		}
+		fmt.Fprintln(tw)
+	}
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	if fromModel {
+		fmt.Fprintln(w, "* the model's own default: the suite's options don't set it.")
+	}
+	if unset {
+		fmt.Fprintln(w, "- set by neither, so the engine's built-in default applies.")
+	}
+	return nil
 }
 
 func ms(d time.Duration) string {

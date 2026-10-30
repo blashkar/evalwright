@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -262,20 +263,20 @@ func (p *lifecycleProvider) Prepare(_ context.Context, model string) (provider.M
 	if model == p.missing {
 		return provider.ModelInfo{}, errors.New("not installed")
 	}
-	return provider.ModelInfo{Digest: "digest-of-" + model}, nil
+	return provider.ModelInfo{Digest: "digest-of-" + model, Defaults: map[string]any{"temperature": 1.0, "top_k": 64.0, "num_ctx": 2048.0}}, nil
 }
 
-func (p *lifecycleProvider) Warm(ctx context.Context, model string, options map[string]any) error {
+func (p *lifecycleProvider) Warm(ctx context.Context, model string, options map[string]any) (provider.LoadInfo, error) {
 	p.events = append(p.events, "warm "+model)
 	p.warmOptions = options
 	if model == p.cannotLoad {
-		return errors.New("out of memory")
+		return provider.LoadInfo{}, errors.New("out of memory")
 	}
 	if p.slowLoad {
 		<-ctx.Done()
-		return ctx.Err()
+		return provider.LoadInfo{}, ctx.Err()
 	}
-	return nil
+	return provider.LoadInfo{Processor: "100% GPU", ContextLength: 4096}, nil
 }
 
 func (p *lifecycleProvider) Generate(ctx context.Context, req provider.Request) (provider.Response, error) {
@@ -299,12 +300,36 @@ func TestRunPreparesAllModelsFirstThenWarmsEach(t *testing.T) {
 	if len(rep.Models) != 2 || rep.Models[0].Model != "x:a" || rep.Models[1].Digest != "digest-of-b" {
 		t.Errorf("Models = %+v", rep.Models)
 	}
+	// So is how each was loaded, and the parallelism, since both can change
+	// the answers a seed gives.
+	if len(rep.Loads) != 2 || rep.Loads[1].Processor != "100% GPU" || rep.Loads[1].ContextLength != 4096 {
+		t.Errorf("Loads = %+v", rep.Loads)
+	}
+	if rep.Parallel != 1 {
+		t.Errorf("Parallel = %d, want 1", rep.Parallel)
+	}
 	want := []string{"prepare a", "prepare b", "warm a", "warm b"}
 	if !slices.Equal(p.events, want) {
 		t.Errorf("events = %v, want %v", p.events, want)
 	}
 	if !slices.Equal(started, []string{"x:a", "x:b"}) {
 		t.Errorf("OnModel calls = %v", started)
+	}
+}
+
+func TestRunRecordsSampling(t *testing.T) {
+	r := Runner{Providers: provider.Registry{"x": &lifecycleProvider{}}}
+	s := mustParse(t, "name: s\nmodels: [x:a]\noptions: {temperature: 0.7, seed: 1}\nprompt: hi\ncases: [{assert: [{contains: hi}]}]\n")
+	rep, err := r.Run(context.Background(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The suite's temperature wins over the model's; top_k is the model's
+	// own. Options that aren't about sampling, like seed and num_ctx, are
+	// recorded elsewhere.
+	want := map[string]Setting{"temperature": {Value: 0.7, From: "suite"}, "top_k": {Value: 64.0, From: "model"}}
+	if got := rep.Models[0].Sampling; !reflect.DeepEqual(got, want) {
+		t.Errorf("Sampling = %v, want %v", got, want)
 	}
 }
 

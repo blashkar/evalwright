@@ -35,11 +35,15 @@ func TestOllamaIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Prepare: %v", err)
 	}
-	if info.Digest == "" || info.ParameterSize == "" {
+	if info.Digest == "" || info.ParameterSize == "" || !strings.HasPrefix(info.Engine, "ollama ") {
 		t.Errorf("Prepare returned no model details: %+v", info)
 	}
-	if err := o.Warm(ctx, model, nil); err != nil {
+	load, err := o.Warm(ctx, model, nil)
+	if err != nil {
 		t.Fatalf("Warm: %v", err)
+	}
+	if load.Processor == "" {
+		t.Errorf("Warm didn't say where the model runs: %+v", load)
 	}
 
 	resp, err := o.Generate(ctx, Request{

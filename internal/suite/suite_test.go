@@ -218,19 +218,22 @@ func TestOptionsValidation(t *testing.T) {
 func TestWarnings(t *testing.T) {
 	tests := []struct {
 		name     string
+		models   string
 		samples  int
 		options  string
 		wantWarn bool
 	}{
-		{"greedy decoding with samples", 3, "{temperature: 0}", true},
-		{"greedy decoding with samples (float)", 3, "{temperature: 0.0}", true},
-		{"greedy decoding single sample", 1, "{temperature: 0}", false},
-		{"sampling temperature", 3, "{temperature: 0.7}", false},
-		{"no temperature (server default)", 3, "{}", false},
+		{"greedy decoding with samples", "[m:a]", 3, "{temperature: 0}", true},
+		{"greedy decoding with samples (float)", "[m:a]", 3, "{temperature: 0.0}", true},
+		{"greedy decoding single sample", "[m:a]", 1, "{temperature: 0}", false},
+		{"sampling temperature", "[m:a]", 3, "{temperature: 0.7}", false},
+		{"no temperature, samples", "[m:a]", 3, "{}", true},
+		{"no temperature, several models", "[m:a, m:b]", 1, "{}", true},
+		{"no temperature, one answer", "[m:a]", 1, "{}", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			src := fmt.Sprintf("name: x\nmodels: [m:a]\nprompt: p\nsamples: %d\noptions: %s\ncases: [{assert: [{contains: a}]}]\n", tt.samples, tt.options)
+			src := fmt.Sprintf("name: x\nmodels: %s\nprompt: p\nsamples: %d\noptions: %s\ncases: [{assert: [{contains: a}]}]\n", tt.models, tt.samples, tt.options)
 			s, err := Parse(strings.NewReader(src), "test.yaml")
 			if err != nil {
 				t.Fatal(err)
