@@ -334,7 +334,7 @@ The same change at 5 samples passed the gate: the same cases fell to 0/5, but at
 
 [`examples/compare-models.yaml`](examples/compare-models.yaml) tests both models as a support assistant for a fictional shoe store, with 21 cases × 5 samples. The system prompt lists the store's facts, so each case has a checkable right answer: quoting the facts passes, and inventing a policy, an order status or a feature fails. The cases cover returns, shipping, sizes, payment, questions the facts don't answer (which should go to the support address), a French customer, a prompt injection and a request to leak the system prompt. The suite sets the sampling settings models ship their own defaults for (temperature 0.7, top_k 40, top_p 0.9, min_p 0, repeat_penalty 1), so both models sample the same way; see [Do the settings matter?](#do-the-settings-matter) for what changes when they don't.
 
-Results from seed 7 (`evalwright run examples/compare-models.yaml` in a clone), with seed 2024 alongside as a check:
+Results with seed 7 (`evalwright run examples/compare-models.yaml` in a clone; the 5 samples use seeds 7 to 11), with seed 2024 alongside as a check. Each cell counts the samples that passed:
 
 | Case | llama3.2:3b | qwen3:30b-a3b | What fails (examples from both seeds) |
 |---|---|---|---|
@@ -358,7 +358,7 @@ Compared with ollama:llama3.2:3b (the first model), case by case:
   ollama:qwen3:30b-a3b-instruct-2507-q4_K_M passes more often: +22 points (95% interval +3 to +41).
 ```
 
-Seed 2024 doesn't confirm it: 63% against 80%, +17 points (−2 to +36), **not significant**.
+With seed 2024 (seeds 2024 to 2028), the gap isn't confirmed: 63% against 80%, so qwen3 is 17 points ahead, but the 95% interval runs from −2 to +36. It includes zero, so the run can't rule out that the models are equally good: **not significant**.
 
 What this says, and what it doesn't:
 
@@ -368,25 +368,26 @@ What this says, and what it doesn't:
 
 ### Do the settings matter?
 
-Left to themselves, the two models sample differently: qwen3 ships with temperature 0.7, top_k 20, top_p 0.8 and repeat_penalty 1, while llama3.2 has no defaults of its own, so it gets Ollama's (documented as temperature 0.8, top_k 40, top_p 0.9). To see whether that changes the conclusion, the same suite was run with only the seed set, so each model used its own settings (seed 7):
+Left to themselves, the two models sample differently: qwen3 ships with temperature 0.7, top_k 20, top_p 0.8 and repeat_penalty 1, while llama3.2 has no defaults of its own, so it gets Ollama's (documented as temperature 0.8, top_k 40, top_p 0.9). To see whether that changes the conclusion, the suite was also run with only the seed set, so each model used its own defaults. With the two runs above, that makes three:
 
-| Settings | llama3.2:3b | qwen3:30b-a3b | qwen3 − llama3.2 |
-|---|---|---|---|
-| The same for both (the suite as shipped) | 61% | 83% | +22 points (+3 to +41) |
-| Each model's own | 63% | 80% | +17 points (−2 to +36) |
+| Run | Sampling settings | Seeds | llama3.2:3b | qwen3:30b-a3b | qwen3 ahead by (95% interval) |
+|---|---|---|---|---|---|
+| 1 | the same for both, as the suite sets them | 7–11 | 61% | 83% | 22 points (3 to 41) |
+| 2 | the same for both | 2024–2028 | 63% | 80% | 17 points (−2 to 36) |
+| 3 | each model's own defaults | 7–11 | 63% | 80% | 17 points (−2 to 36) |
 
-Each model's own run against its run with shared settings, via `--save-baseline` and `--baseline`. Same model, cases and seeds, so the comparison is paired, and "options" is the only thing that changed:
+To measure the settings' effect on each model, run 3 was compared with run 1 using `--save-baseline` and `--baseline`. Same model, cases and seeds, so each answer is compared with its counterpart, and the settings are the only thing that changed:
 
-| Model | Change from its own settings | Cases that changed significantly |
+| Model | Pass rate with its own defaults, minus with the shared settings (95% interval) | Cases that changed significantly |
 |---|---|---|
 | llama3.2:3b | +2 points (−7 to +11) | none |
 | qwen3:30b-a3b | −3 points (−12 to +7) | none |
 
 - **Within this range, the settings don't measurably change either model.** Both intervals include zero. They don't rule out a small effect, and at 5 samples no single case could have been flagged (the report says 6 are needed).
-- **So the comparison doesn't depend on them either.** qwen3 leads by about the same amount both ways, and is just as borderline.
-- **Failures that persist under every setting and seed are the model's, not sampling's.** In all three runs, llama3.2 passes at most 1 of 5 on the order status, the waterproof and discount questions, gift cards and the French worn return, and qwen3 on the cancellation and the discount question. Tighter sampling won't fix these: a clearer system prompt or a different model might. Cases that move from run to run, like llama3.2 on size-in-range (0/5, 3/5, 0/5), are where sampling matters.
+- **So the comparison doesn't depend on them either.** qwen3 leads by about the same amount in all three runs, and is just as borderline.
+- **Failures that persist in all three runs are the model's, not sampling's.** In each run, llama3.2 passes at most 1 of 5 on the order status, the waterproof and discount questions, gift cards and the French worn return, and qwen3 on the cancellation and the discount question. Tighter sampling won't fix these: a clearer system prompt or a different model might. Cases that move from run to run, like llama3.2 on size-in-range (0/5, 3/5, 0/5 in runs 1, 2 and 3), are where sampling matters.
 
-Earlier versions of this README set only `temperature`, so qwen3 ran with its own top_k and top_p and llama3.2 with Ollama's; they reported +19 points (+0.3 to +38) and, with seed 2024, +20 (+1 to +39). llama3.2's answers are byte-identical under both, so Ollama's built-in values for those settings are the ones the suite now sets; qwen3's changed.
+Earlier versions of this README set only `temperature`, so qwen3 ran with its own top_k and top_p and llama3.2 with Ollama's. They reported qwen3 ahead by 19 points (0.3 to 38) with seeds 7–11, and by 20 (1 to 39) with seeds 2024–2028. llama3.2's answers in those runs are byte-identical to runs 1 and 2, so Ollama's built-in values for those settings are the ones the suite now sets; qwen3's answers changed.
 
 ### Checking the checks
 
