@@ -116,6 +116,13 @@ func writeBaseline(w io.Writer, cmp *baseline.Comparison) error {
 		if m.BuildChanged() {
 			fmt.Fprintf(w, "    model build changed: %s, was %s\n", short(m.Digest), short(m.BaseDigest))
 		}
+		for _, c := range m.Runtime {
+			fmt.Fprintf(w, "    %s changed: %s, was %s\n", c.What, c.Now, c.Base)
+		}
+		if n := m.Reproducible - m.Reproduced; n > 0 {
+			fmt.Fprintf(w, "    %d of %d cases gave different answers with the same inputs, seeds, model build and runtime, so they are tested too. A seed repeats an answer only if everything that computes it is the same: likely causes are --parallel above 1, other programs using the server, or a server change evalwright doesn't record, such as its hardware or settings.\n",
+				n, m.Reproducible)
+		}
 		if inc, ok := m.LatencyIncrease(); ok {
 			fmt.Fprintf(w, "    median latency %s, was %s (%+.0f%%)\n",
 				ms(m.LatencyP50), ms(m.BaseLatencyP50), inc*100)
@@ -171,7 +178,9 @@ func changes(c baseline.CaseResult) string {
 	case c.Status == baseline.New || c.Status == baseline.Removed:
 		return "-"
 	case len(c.Changes) == 0:
-		return "answers only" // same inputs, so the model or server answered differently
+		// Nothing evalwright records changed, yet the answers did: sampling
+		// that isn't deterministic, or a change to the server it can't see.
+		return "answers only"
 	default:
 		return strings.Join(c.Changes, ", ")
 	}

@@ -122,8 +122,24 @@ Before running anything, evalwright checks that every model is installed. `--pul
 
 LLM output varies, so `samples: N` runs each case N times and reports a pass rate. For that to mean anything, the samples have to be able to differ:
 
-- **Each sample gets its own seed.** If the suite sets `seed: 7`, samples use seeds 7, 8, 9, … . A single fixed seed would make every sample an identical copy, and a 100% pass rate over copies measures nothing. The seed each sample used is saved in the JSON results, so any answer can be reproduced exactly. Seeds must be between 0 and 4294967295: Ollama treats -1 as "random", and models only use 32-bit seeds.
+- **Each sample gets its own seed.** If the suite sets `seed: 7`, samples use seeds 7, 8, 9, … . A single fixed seed would make every sample an identical copy, and a 100% pass rate over copies measures nothing. The seed each sample used is saved in the JSON results, so any answer can be reproduced on the same setup (see below). Seeds must be between 0 and 4294967295: Ollama treats -1 as "random", and models only use 32-bit seeds.
 - **Use a sampling temperature.** At `temperature: 0` the model always picks its most likely token, so every sample is the same; evalwright warns if a suite combines that with `samples` > 1. Even 0.2 gives near-identical answers in practice. 0.7 is a realistic chat setting.
+
+#### What a seed does and doesn't fix
+
+A model writes one token at a time. For each one, the network computes a probability for every possible next token, and the sampler draws one at random from those probabilities. **The seed fixes only the draw.** The probabilities come from floating-point arithmetic whose last digits depend on the inference engine's version, the hardware (GPU or CPU, and which kernels run on it) and settings such as the context window and how requests are batched. When two tokens are nearly tied, a change in the last digit can tip the draw to the other one, and from then on every later token differs. That is also why `temperature: 0`, with no draw at all, still isn't guaranteed to give the same answer on a different setup.
+
+So a seed reproduces an answer only when the model build, the engine and the runtime stay the same. evalwright records what it can see of them, in the `-o` JSON and in baselines:
+
+| Recorded | From | Example |
+|---|---|---|
+| Model build | the model's digest | `sha256:a80c4f17…` |
+| Engine | the server's version | `ollama 0.32.15` |
+| Processor | where the model was loaded, as `ollama ps` shows it | `100% GPU`, `100% CPU`, `25%/75% CPU/GPU` |
+| Context length | the context window it was loaded with | `131072` |
+| Parallel | `--parallel` | `1` |
+
+It can't see everything: a different GPU of the same kind, the server's own settings (`OLLAMA_NUM_PARALLEL`, flash attention, KV-cache type) or other programs using the server at the same time. The baseline gate doesn't depend on any of this being complete, because it checks whether answers repeated rather than assuming they did; see [Catching regressions with a baseline](#catching-regressions-with-a-baseline).
 
 ### Assertions
 
@@ -160,7 +176,7 @@ LLM output varies, so `samples: N` runs each case N times and reports a pass rat
 | `--save-baseline` | | Save this run's results as a baseline file. Saved even if cases fail: known failures are part of the baseline. |
 | `--baseline` | | Compare with a saved baseline, and fail only if results got significantly worse. |
 
-**Choosing `--parallel`:** match it to what your server actually runs in parallel (`OLLAMA_NUM_PARALLEL`). Extra requests wait in Ollama's queue, and that wait is measured as latency. In one test on a server handling one request at a time, the same cases averaged 0.67s with `-p 1` and 1.3s with `-p 2`.
+**Choosing `--parallel`:** match it to what your server actually runs in parallel (`OLLAMA_NUM_PARALLEL`). Extra requests wait in Ollama's queue, and that wait is measured as latency. In one test on a server handling one request at a time, the same cases averaged 0.67s with `-p 1` and 1.3s with `-p 2`. A server that does run requests together may batch them, and a batched answer isn't guaranteed to be the one the same seed gives alone, so evalwright warns when `--parallel` above 1 is used with a baseline. Use `-p 1` for runs you compare with a baseline.
 
 ### Reading the report
 
@@ -238,23 +254,25 @@ evalwright run suite.yaml --samples 10 --save-baseline baseline.json   # once, a
 evalwright run suite.yaml --samples 10 --baseline baseline.json        # in CI: exit 1 only if results got worse
 ```
 
-A baseline stores, for every model and case, the pass count, the seeds, the model's digest, its median latency, and hashes of what the case sent and checked (system prompt, rendered prompt, options, assertions) and of the answers it got. It stores hashes, not text, so it is small and doesn't copy your prompts or answers. `--baseline` and `--save-baseline` can't be the same file, so a failing run can't overwrite the baseline it's judged against.
+A baseline stores, for every model and case, the pass count, the seeds, the model's digest, what ran it (engine, processor, context length, parallel; see [What a seed does and doesn't fix](#what-a-seed-does-and-doesnt-fix)), its median latency, and hashes of what the case sent and checked (system prompt, rendered prompt, options, assertions) and of the answers it got. It stores hashes, not text, so it is small and doesn't copy your prompts or answers. `--baseline` and `--save-baseline` can't be the same file, so a failing run can't overwrite the baseline it's judged against.
 
 Each case gets one of these results:
 
 | Result | Meaning |
 |---|---|
-| identical | Same inputs, checks and model build, and the same answers. With fixed seeds an unchanged case reproduces exactly, so this is the usual result. |
+| identical | Same inputs, checks, model build and runtime, and the same answers. With fixed seeds on an unchanged setup this is the usual result. |
 | unchanged | Same pass count, though something differs (the report says what). |
 | changed | The pass count differs, but not by more than chance explains. |
 | regressed / improved | It passes significantly less or more often: a one-sided Fisher's exact test, Holm-corrected across the cases that differ from the baseline, p < 0.05. |
 | new / removed | Only this run, or only the baseline, has the case. |
 
-The WHAT CHANGED column says which input differs from the baseline: system prompt, prompt, options, checks, model build or samples. "answers only" means nothing you control changed, but the model answered differently.
+The WHAT CHANGED column says what differs from the baseline: system prompt, prompt, options, checks, samples, model build, engine (the server's version) or runtime (processor, context length or parallel; the lines under the model's summary say which, and what they were). "answers only" means nothing evalwright records changed, but the model answered differently: something it can't see changed, such as the hardware, the server's settings or other programs using it at the same time.
 
 **When the gate fails.** Exit code 1 if a case regressed, if a model's overall pass rate dropped (the paired difference's 95% interval is entirely below zero), or if the suite's `min_pass_rate` or `max_latency_increase` is broken. Otherwise, failures already in the baseline, new models and new cases never fail it; `min_pass_rate`, if set, applies to every model, new ones included. Latency only fails the run when the suite sets `max_latency_increase`, because it depends on whatever else the machine is doing: the same unchanged run varied by 10–40% while another program was using Ollama.
 
-**Only changed cases are tested.** With the same inputs, seeds and model build, a case reproduces exactly, so an identical case can't have regressed and isn't counted in the correction. If you edit one case's prompt, that case is tested on its own, and even 5/5 falling to 0/5 is caught (p = 0.004). Editing the system prompt or switching the model build changes every case, so all of them are tested.
+**Only changed cases are tested.** A case that gave exactly the same answers as in the baseline, with nothing changed, can't have regressed, so it isn't counted in the correction. If you edit one case's prompt and the other cases repeat their answers, that case is tested on its own, and even 5/5 falling to 0/5 is caught (p = 0.004). Editing the system prompt, or switching the model build, engine or runtime, changes every case, so all of them are tested.
+
+**Reproduction is checked, not assumed.** Whether a case is identical is decided by comparing hashes of its answers, never by its inputs alone. If something evalwright doesn't record changes the answers, the cases are no longer identical and are tested like any other: the gate stays valid but needs more samples to flag a single case, as below. The report says when this happens, for example "3 of 21 cases gave different answers with the same inputs, seeds, model build and runtime". If it happens on every run, check `--parallel` and whatever else is using the server. In one check (llama3.2:3b on a GPU, 21 cases × 3 samples), rerunning gave byte-identical answers for all 21 cases, with `-p 1` and with `-p 2` alike.
 
 **Use enough samples.** When many cases changed, a one-case regression can only be significant if the run is big enough. With 5 samples, 5/5 falling to 0/5 has p = 0.004, but corrected for 21 cases it becomes 0.083: no single case can ever be flagged, whatever happens to it. The report warns when this is so and says how many samples would fix it (6 for 21 cases). 10 samples is a good default for a gate. The overall check still works at 5 samples, but only catches a change that is broad, not one that breaks a few cases.
 
@@ -358,7 +376,7 @@ llama3.2 generates faster (99 against 76 tokens/s) and starts sooner, and here i
 - **Models are the outer loop.** Local models are slow to load, so each model handles all of its cases before the next model is loaded.
 - **Ctrl-C keeps partial results.** Cancellation goes through `context.Context`, which also aborts in-flight HTTP streams, and evalwright prints whatever finished and still writes it to `-o`. An interrupted run is reported as `INTERRUPTED`, never `PASS`.
 - **Bounded concurrency, deterministic output.** Each model gets a semaphore-limited set of goroutines. Each goroutine writes its result into its own slot of a preallocated slice, so no lock is needed and results come out in suite order however requests interleave.
-- **A hand-written Ollama client.** About 380 lines over `net/http` with newline-delimited JSON streaming, rather than an SDK, so evalwright controls timeouts, cancellation and error messages ("cannot reach Ollama at …; is it running?").
+- **A hand-written Ollama client.** About 400 lines over `net/http` with newline-delimited JSON streaming, rather than an SDK, so evalwright controls timeouts, cancellation and error messages ("cannot reach Ollama at …; is it running?").
 - **Pluggable providers and assertions.** Both are small interfaces (`provider.Provider`, `assert.Assertion`), so adding a backend or a check doesn't touch the runner.
 
 ## Project layout

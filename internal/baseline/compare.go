@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"strconv"
 	"time"
 
 	"github.com/blashkar/evalwright/internal/runner"
@@ -46,8 +47,9 @@ type CaseResult struct {
 	// P is the Holm-adjusted one-sided p-value for Regressed and Improved:
 	// the chance of a change this large if the pass rate hadn't changed.
 	P float64
-	// Changes names what differs from the baseline, e.g. "prompt" or
-	// "model build"; it is empty if the case ran exactly as before.
+	// Changes names what differs from the baseline, e.g. "prompt",
+	// "model build" or "engine"; it is empty if nothing evalwright records
+	// differs.
 	Changes []string
 }
 
@@ -71,11 +73,50 @@ type ModelResult struct {
 	// Tested is the number of cases tested for a change: those that differ
 	// from the baseline. Identical cases can't have changed.
 	Tested int
+	// Reproducible is the number of cases that ran with the same inputs,
+	// seeds, model build and runtime as in the baseline, and Reproduced how
+	// many of them gave exactly the same answers. Fewer means something
+	// evalwright doesn't record changed the answers, so those cases were
+	// tested too.
+	Reproducible, Reproduced int
 	// Digest and BaseDigest identify the model builds, if known.
 	Digest, BaseDigest string
+	// Runtime lists the differences from the baseline in what ran the
+	// model, such as the engine's version or where the model ran.
+	Runtime []RuntimeChange
 	// LatencyP50 and BaseLatencyP50 are the median latencies; zero if not
 	// measured.
 	LatencyP50, BaseLatencyP50 time.Duration
+}
+
+// RuntimeChange is one difference from the baseline in what ran a model.
+type RuntimeChange struct {
+	// What is "engine", "processor", "context length" or "parallel".
+	What      string
+	Now, Base string
+}
+
+// runtimeChanges lists what differs between the software and settings that
+// ran now and base. A value missing from either, as in a baseline saved
+// before evalwright recorded it, isn't counted as a change.
+func runtimeChanges(now, base Model) []RuntimeChange {
+	var out []RuntimeChange
+	add := func(what, a, b string) {
+		if a != "" && b != "" && a != b {
+			out = append(out, RuntimeChange{What: what, Now: a, Base: b})
+		}
+	}
+	num := func(n int) string {
+		if n <= 0 {
+			return ""
+		}
+		return strconv.Itoa(n)
+	}
+	add("engine", now.Engine, base.Engine)
+	add("processor", now.Processor, base.Processor)
+	add("context length", num(now.ContextLength), num(base.ContextLength))
+	add("parallel", num(now.Parallel), num(base.Parallel))
+	return out
 }
 
 // BuildChanged reports whether the model was re-downloaded as a different
@@ -150,10 +191,21 @@ func compareModel(now, base Model, interrupted bool) (ModelResult, []CaseResult)
 		BaseDigest:     base.Digest,
 		LatencyP50:     now.LatencyP50,
 		BaseLatencyP50: base.LatencyP50,
+		Runtime:        runtimeChanges(now, base),
 	}
-	var buildChange []string
+	// What changed for the whole model is a change for each of its cases.
+	var modelChanges []string
 	if mr.BuildChanged() {
-		buildChange = []string{"model build"}
+		modelChanges = append(modelChanges, "model build")
+	}
+	for _, c := range mr.Runtime {
+		what := "runtime"
+		if c.What == "engine" {
+			what = "engine"
+		}
+		if !slices.Contains(modelChanges, what) {
+			modelChanges = append(modelChanges, what)
+		}
 	}
 
 	var out []CaseResult
@@ -170,9 +222,17 @@ func compareModel(now, base Model, interrupted bool) (ModelResult, []CaseResult)
 		}
 		b := base.Cases[i]
 		r := CaseResult{Model: now.Model, Case: c.Case, Now: tally(c), Base: tally(b)}
-		r.Changes = append(c.Fingerprint.Changes(b.Fingerprint), buildChange...)
+		r.Changes = append(c.Fingerprint.Changes(b.Fingerprint), modelChanges...)
 		if c.Total != b.Total {
 			r.Changes = append(r.Changes, "samples")
+		}
+		// Without seeds the answers aren't expected to repeat, so only seeded
+		// cases count toward how well the run reproduces the baseline.
+		if len(r.Changes) == 0 && len(c.Seeds) > 0 {
+			mr.Reproducible++
+			if c.Outputs == b.Outputs {
+				mr.Reproduced++
+			}
 		}
 		switch {
 		case len(r.Changes) == 0 && c.Outputs == b.Outputs:
@@ -201,10 +261,13 @@ func compareModel(now, base Model, interrupted bool) (ModelResult, []CaseResult)
 
 	// Each direction is its own family of tests, corrected for the number
 	// of cases tested, so testing 20 cases doesn't flag a chance
-	// difference. Identical cases aren't tested: with the same inputs,
-	// seeds and model build they reproduce exactly, so they can't have
-	// regressed, and counting them would only make the correction stricter.
-	// Editing one case's prompt then tests that one case alone.
+	// difference. Identical cases aren't tested: they gave exactly the
+	// answers they gave in the baseline, so they can't have regressed, and
+	// counting them would only make the correction stricter. Editing one
+	// case's prompt then tests that one case alone, if the rest reproduce.
+	// A seed reproduces an answer only on the same model build, engine and
+	// hardware; when something evalwright doesn't record changes, the
+	// answers differ, and those cases are tested like any other.
 	for j, p := range stats.Holm(lessP) {
 		if r := &out[tested[j]]; p < significance && r.Status == Changed {
 			r.Status, r.P = Regressed, p

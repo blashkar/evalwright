@@ -168,6 +168,30 @@ func (c *Client) Pull(ctx context.Context, model string, fn func(PullProgress) e
 	return nil
 }
 
+// RunningModel is a model loaded in memory, as listed by Running.
+type RunningModel struct {
+	Name string `json:"name"`
+	// Size is the memory the loaded model takes, and SizeVRAM the part of it
+	// in GPU memory: equal if the model runs entirely on the GPU, zero if it
+	// runs on the CPU.
+	Size     int64 `json:"size"`
+	SizeVRAM int64 `json:"size_vram"`
+	// ContextLength is the context window it was loaded with. Older servers
+	// don't report it.
+	ContextLength int `json:"context_length,omitempty"`
+}
+
+// Running returns the models currently loaded in memory.
+func (c *Client) Running(ctx context.Context) ([]RunningModel, error) {
+	var body struct {
+		Models []RunningModel `json:"models"`
+	}
+	if err := c.getJSON(ctx, http.MethodGet, "/api/ps", nil, &body); err != nil {
+		return nil, err
+	}
+	return body.Models, nil
+}
+
 // Version returns the server's version. It is a cheap way to check that the
 // server is reachable.
 func (c *Client) Version(ctx context.Context) (string, error) {

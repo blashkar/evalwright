@@ -67,23 +67,41 @@ type Preparer interface {
 	Prepare(ctx context.Context, model string) (ModelInfo, error)
 }
 
-// ModelInfo identifies the exact build of a model. A name such as
-// llama3.2:3b can point to a different build after a new download, so
-// results record the digest to show which build produced them. Fields a
-// provider doesn't know are left empty.
+// ModelInfo identifies the exact build of a model, and the software that
+// runs it. A name such as llama3.2:3b can point to a different build after
+// a new download, so results record the digest to show which build
+// produced them. Fields a provider doesn't know are left empty.
 type ModelInfo struct {
 	Digest        string `json:"digest,omitempty"`
 	Family        string `json:"family,omitempty"`
 	ParameterSize string `json:"parameter_size,omitempty"`
 	Quantization  string `json:"quantization,omitempty"`
+	// Engine is the server software and its version, e.g. "ollama 0.32.15".
+	// A seed only reproduces an answer on the same engine: a new version
+	// can compute the same model's probabilities slightly differently.
+	Engine string `json:"engine,omitempty"`
 }
 
 // Warmer is implemented by providers that can load a model ahead of time.
 // The runner warms each model just before its cases run, so the time to
 // load it isn't counted as the first case's latency. options are the
 // suite's options, since some of them can change how a model is loaded.
+// Warm returns how the model was loaded.
 type Warmer interface {
-	Warm(ctx context.Context, model string, options map[string]any) error
+	Warm(ctx context.Context, model string, options map[string]any) (LoadInfo, error)
+}
+
+// LoadInfo describes how a loaded model runs: server settings, rather than
+// the suite's, that can change its answers. Running the same model on a GPU
+// instead of the CPU, or with a different context window, uses different
+// arithmetic, so a seed that reproduced an answer before may not. Fields a
+// provider doesn't know are left empty.
+type LoadInfo struct {
+	// Processor is where the model runs, like Ollama's `ollama ps`:
+	// "100% GPU", "100% CPU" or "25%/75% CPU/GPU".
+	Processor string `json:"processor,omitempty"`
+	// ContextLength is the context window the model was loaded with.
+	ContextLength int `json:"context_length,omitempty"`
 }
 
 // Registry maps a provider name to its implementation. Suites refer to models

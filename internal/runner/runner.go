@@ -45,11 +45,15 @@ type Report struct {
 	Duration time.Duration `json:"duration_ns"`
 	// Interrupted is set when the run was cancelled before every case ran.
 	Interrupted bool `json:"interrupted,omitempty"`
+	// Parallel is the most requests that were sent to one model at a time.
+	// Above 1, a server may batch requests together, and a batched answer
+	// isn't always exactly the answer the same request gets on its own.
+	Parallel int `json:"parallel,omitempty"`
 	// Models records which build of each model ran, for providers that
 	// report it.
 	Models []ModelInfo `json:"models,omitempty"`
 	// Loads records how long each model took to load before its cases ran,
-	// for providers that load models.
+	// and how it was loaded, for providers that load models.
 	Loads []ModelLoad `json:"loads,omitempty"`
 	// Cases records what each case sent and checked, in suite order.
 	Cases   []CaseInfo `json:"cases,omitempty"`
@@ -62,11 +66,12 @@ type ModelInfo struct {
 	provider.ModelInfo
 }
 
-// ModelLoad is the time it took to load one model into memory. It is close
-// to zero if the model was already loaded.
+// ModelLoad is how one model was loaded into memory, and how long it took.
+// The time is close to zero if the model was already loaded.
 type ModelLoad struct {
 	Model string        `json:"model"`
 	Time  time.Duration `json:"time_ns"`
+	provider.LoadInfo
 }
 
 // Runner runs suites using the providers in its registry.
@@ -121,7 +126,7 @@ func (r *Runner) Run(ctx context.Context, s *suite.Suite) (*Report, error) {
 		return nil, err
 	}
 
-	rep := &Report{Suite: s.Name, Started: time.Now(), Models: models}
+	rep := &Report{Suite: s.Name, Started: time.Now(), Models: models, Parallel: max(r.Parallel, 1)}
 	for i := range cases {
 		rep.Cases = append(rep.Cases, CaseInfo{Name: cases[i].Name, Fingerprint: fingerprint(s, &cases[i])})
 	}
@@ -233,13 +238,14 @@ func (r *Runner) runModel(ctx context.Context, t target, s *suite.Suite, cases [
 	var load *ModelLoad
 	if _, ok := t.p.(provider.Warmer); ok {
 		start := time.Now()
-		if err := r.warm(ctx, t, s); err != nil {
+		info, err := r.warm(ctx, t, s)
+		if err != nil {
 			if ctx.Err() != nil {
 				return nil, nil, ctx.Err()
 			}
 			return r.failAll(t, jobs, "loading model: "+err.Error()), nil, nil
 		}
-		load = &ModelLoad{Model: t.spec, Time: time.Since(start)}
+		load = &ModelLoad{Model: t.spec, Time: time.Since(start), LoadInfo: info}
 	}
 
 	// Each goroutine writes only its own index, so the slices need no lock,
@@ -295,18 +301,18 @@ func (r *Runner) failAll(t target, jobs []job, msg string) []Result {
 // warm loads t's model, so the load time isn't counted as the first case's
 // latency. It has the same time limit as a request, so a model that never
 // finishes loading can't hang the run. t's provider must be a Warmer.
-func (r *Runner) warm(ctx context.Context, t target, s *suite.Suite) error {
+func (r *Runner) warm(ctx context.Context, t target, s *suite.Suite) (provider.LoadInfo, error) {
 	w := t.p.(provider.Warmer)
 	if r.CaseTimeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, r.CaseTimeout)
 		defer cancel()
 	}
-	err := w.Warm(ctx, t.model, s.Options)
+	info, err := w.Warm(ctx, t.model, s.Options)
 	if r.CaseTimeout > 0 && errors.Is(err, context.DeadlineExceeded) && ctx.Err() != nil {
-		return fmt.Errorf("timed out after %s", r.CaseTimeout)
+		return info, fmt.Errorf("timed out after %s", r.CaseTimeout)
 	}
-	return err
+	return info, err
 }
 
 func (r *Runner) report(res Result) {

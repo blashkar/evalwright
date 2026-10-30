@@ -46,6 +46,19 @@ func (f *fakeOllama) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			models = append(models, map[string]string{"name": m, "digest": "digest-of-" + m})
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"models": models})
+	case "/api/version":
+		fmt.Fprint(w, `{"version":"0.32.15"}`)
+	case "/api/ps":
+		// Loaded models are listed by their full name, with the tag.
+		var models []map[string]any
+		for _, l := range f.loads {
+			name, _ := l["model"].(string)
+			if !strings.Contains(name, ":") {
+				name += ":latest"
+			}
+			models = append(models, map[string]any{"name": name, "size": 4000, "size_vram": 3000, "context_length": 8192})
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"models": models})
 	case "/api/pull":
 		fmt.Fprintln(w, `{"status":"pulling manifest"}`)
 		fmt.Fprintln(w, `{"status":"pulling abc","digest":"sha256:abc","total":2000000000,"completed":1000000000}`)
@@ -155,7 +168,7 @@ func TestOllamaPrepare(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Prepare: %v", err)
 		}
-		want := ModelInfo{Digest: "digest-of-llama3.2:3b", Family: "llama", ParameterSize: "3.2B", Quantization: "Q4_K_M"}
+		want := ModelInfo{Digest: "digest-of-llama3.2:3b", Family: "llama", ParameterSize: "3.2B", Quantization: "Q4_K_M", Engine: "ollama 0.32.15"}
 		if info != want {
 			t.Errorf("info = %+v, want %+v", info, want)
 		}
@@ -197,8 +210,13 @@ func TestOllamaWarm(t *testing.T) {
 	// num_ctx changes how a model is loaded, so the load must use the
 	// suite's options or Ollama would reload the model on the first case.
 	opts := map[string]any{"num_ctx": 8192}
-	if err := (&Ollama{Client: client}).Warm(context.Background(), "m", opts); err != nil {
+	info, err := (&Ollama{Client: client}).Warm(context.Background(), "m", opts)
+	if err != nil {
 		t.Fatalf("Warm: %v", err)
+	}
+	// Where the model runs can change its answers, so Warm reports it.
+	if want := (LoadInfo{Processor: "25%/75% CPU/GPU", ContextLength: 8192}); info != want {
+		t.Errorf("info = %+v, want %+v", info, want)
 	}
 	loads := fake.loaded()
 	if len(loads) != 1 || loads[0]["model"] != "m" {
@@ -206,6 +224,23 @@ func TestOllamaWarm(t *testing.T) {
 	}
 	if got, _ := loads[0]["options"].(map[string]any); got["num_ctx"] != float64(8192) {
 		t.Errorf("load options = %v, want num_ctx 8192", loads[0]["options"])
+	}
+}
+
+func TestProcessor(t *testing.T) {
+	for _, tc := range []struct {
+		size, vram int64
+		want       string
+	}{
+		{4000, 4000, "100% GPU"},
+		{4000, 0, "100% CPU"},
+		{4000, 1000, "75%/25% CPU/GPU"},
+		{0, 0, ""},     // not reported
+		{100, 200, ""}, // inconsistent
+	} {
+		if got := processor(tc.size, tc.vram); got != tc.want {
+			t.Errorf("processor(%d, %d) = %q, want %q", tc.size, tc.vram, got, tc.want)
+		}
 	}
 }
 

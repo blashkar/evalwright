@@ -265,17 +265,17 @@ func (p *lifecycleProvider) Prepare(_ context.Context, model string) (provider.M
 	return provider.ModelInfo{Digest: "digest-of-" + model}, nil
 }
 
-func (p *lifecycleProvider) Warm(ctx context.Context, model string, options map[string]any) error {
+func (p *lifecycleProvider) Warm(ctx context.Context, model string, options map[string]any) (provider.LoadInfo, error) {
 	p.events = append(p.events, "warm "+model)
 	p.warmOptions = options
 	if model == p.cannotLoad {
-		return errors.New("out of memory")
+		return provider.LoadInfo{}, errors.New("out of memory")
 	}
 	if p.slowLoad {
 		<-ctx.Done()
-		return ctx.Err()
+		return provider.LoadInfo{}, ctx.Err()
 	}
-	return nil
+	return provider.LoadInfo{Processor: "100% GPU", ContextLength: 4096}, nil
 }
 
 func (p *lifecycleProvider) Generate(ctx context.Context, req provider.Request) (provider.Response, error) {
@@ -298,6 +298,14 @@ func TestRunPreparesAllModelsFirstThenWarmsEach(t *testing.T) {
 	// Each model's build is recorded, so results can be traced to it.
 	if len(rep.Models) != 2 || rep.Models[0].Model != "x:a" || rep.Models[1].Digest != "digest-of-b" {
 		t.Errorf("Models = %+v", rep.Models)
+	}
+	// So is how each was loaded, and the parallelism, since both can change
+	// the answers a seed gives.
+	if len(rep.Loads) != 2 || rep.Loads[1].Processor != "100% GPU" || rep.Loads[1].ContextLength != 4096 {
+		t.Errorf("Loads = %+v", rep.Loads)
+	}
+	if rep.Parallel != 1 {
+		t.Errorf("Parallel = %d, want 1", rep.Parallel)
 	}
 	want := []string{"prepare a", "prepare b", "warm a", "warm b"}
 	if !slices.Equal(p.events, want) {

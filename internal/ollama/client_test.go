@@ -192,7 +192,7 @@ func TestConnectionRefused(t *testing.T) {
 	}
 }
 
-func TestShowListVersion(t *testing.T) {
+func TestShowListRunningVersion(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/show":
@@ -206,6 +206,8 @@ func TestShowListVersion(t *testing.T) {
 			fmt.Fprint(w, `{"details":{"family":"llama","parameter_size":"3.2B","quantization_level":"Q4_K_M"},"capabilities":["completion","tools"]}`)
 		case "/api/tags":
 			fmt.Fprint(w, `{"models":[{"name":"llama3.2:3b","size":2019393189,"digest":"a80c4f17","details":{"parameter_size":"3.2B","quantization_level":"Q4_K_M"}}]}`)
+		case "/api/ps":
+			fmt.Fprint(w, `{"models":[{"name":"llama3.2:3b","size":3500000000,"size_vram":3500000000,"context_length":4096}]}`)
 		case "/api/version":
 			fmt.Fprint(w, `{"version":"0.32.15"}`)
 		default:
@@ -231,6 +233,14 @@ func TestShowListVersion(t *testing.T) {
 	}
 	if len(models) != 1 || models[0].Name != "llama3.2:3b" || models[0].Details.ParameterSize != "3.2B" {
 		t.Errorf("List = %+v", models)
+	}
+
+	running, err := c.Running(ctx)
+	if err != nil {
+		t.Fatalf("Running: %v", err)
+	}
+	if len(running) != 1 || running[0].SizeVRAM != 3500000000 || running[0].ContextLength != 4096 {
+		t.Errorf("Running = %+v", running)
 	}
 
 	v, err := c.Version(ctx)

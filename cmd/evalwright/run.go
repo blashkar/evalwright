@@ -154,6 +154,11 @@ func runSuites(ctx context.Context, out, errOut io.Writer, paths []string, opts 
 	if err := errors.Join(loadErrs...); err != nil {
 		return err
 	}
+	if opts.parallel > 1 && (opts.baseline != "" || opts.saveBaseline != "") {
+		fmt.Fprintf(errOut, "warning: --parallel %d with a baseline: a server running requests at the same time may batch them, "+
+			"and a batched answer isn't always the one the same seed gives alone. Cases whose answers don't repeat are all tested, "+
+			"which makes the gate less sensitive; use --parallel 1 for runs you compare.\n", opts.parallel)
+	}
 
 	var reports []*runner.Report
 	failed := false

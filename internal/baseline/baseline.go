@@ -42,7 +42,15 @@ type Model struct {
 	Model string `json:"model"`
 	// Digest identifies the exact build of the model, if the provider
 	// reports it.
-	Digest          string        `json:"digest,omitempty"`
+	Digest string `json:"digest,omitempty"`
+	// Engine, Processor, ContextLength and Parallel record what ran the
+	// model, if known: the server's version, whether the model ran on the
+	// GPU or the CPU, its context window, and how many requests ran at
+	// once. A seed reproduces an answer only if they stay the same.
+	Engine          string        `json:"engine,omitempty"`
+	Processor       string        `json:"processor,omitempty"`
+	ContextLength   int           `json:"context_length,omitempty"`
+	Parallel        int           `json:"parallel,omitempty"`
 	LatencyP50      time.Duration `json:"latency_p50_ns,omitempty"`
 	TokensPerSecond float64       `json:"tokens_per_second,omitempty"`
 	Cases           []Case        `json:"cases"`
@@ -119,9 +127,13 @@ func fromReport(rep *runner.Report) Suite {
 	for _, c := range rep.Cases {
 		fingerprints[c.Name] = c.Fingerprint
 	}
-	digests := map[string]string{}
+	infos := map[string]runner.ModelInfo{}
 	for _, m := range rep.Models {
-		digests[m.Model] = m.Digest
+		infos[m.Model] = m
+	}
+	loads := map[string]runner.ModelLoad{}
+	for _, l := range rep.Loads {
+		loads[l.Model] = l
 	}
 
 	type key struct{ model, c string }
@@ -147,7 +159,11 @@ func fromReport(rep *runner.Report) Suite {
 	for _, ms := range rep.Summary() {
 		m := Model{
 			Model:           ms.Model,
-			Digest:          digests[ms.Model],
+			Digest:          infos[ms.Model].Digest,
+			Engine:          infos[ms.Model].Engine,
+			Processor:       loads[ms.Model].Processor,
+			ContextLength:   loads[ms.Model].ContextLength,
+			Parallel:        rep.Parallel,
 			LatencyP50:      ms.LatencyP50,
 			TokensPerSecond: ms.TokensPerSecond,
 		}
