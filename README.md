@@ -285,9 +285,9 @@ The WHAT CHANGED column says what differs from the baseline: system prompt, prom
 
 **Reproduction is checked, not assumed.** Whether a case is identical is decided by comparing hashes of its answers, never by its inputs alone. If something evalwright doesn't record changes the answers, the cases are no longer identical and are tested like any other: the gate stays valid but needs more samples to flag a single case, as below. The report says when this happens, for example "3 of 21 cases gave different answers with the same inputs, seeds, model build and runtime". If it happens on every run, check `--parallel` and whatever else is using the server. In one check (llama3.2:3b on a GPU, 21 cases × 3 samples), rerunning gave byte-identical answers for all 21 cases, with `-p 1` and with `-p 2` alike.
 
-**Use enough samples.** When many cases changed, a one-case regression can only be significant if the run is big enough. With 5 samples, 5/5 falling to 0/5 has p = 0.004, but corrected for 21 cases it becomes 0.083: no single case can ever be flagged, whatever happens to it. The report warns when this is so and says how many samples would fix it (6 for 21 cases). 10 samples is a good default for a gate. The overall check still works at 5 samples, but only catches a change that is broad, not one that breaks a few cases.
+**Use enough samples.** When many cases changed, a one-case regression can only be significant if the run is big enough. With 5 samples, 5/5 falling to 0/5 has p = 0.004, but corrected for 21 cases it becomes 0.083: no single case can ever be flagged, whatever happens to it. The report warns when this is so and says how many samples would fix it (6 for 21 cases, 7 for 51). 10 samples is a good default for a gate. The overall check still works at 5 samples, but only catches a change that is broad, not one that breaks a few cases.
 
-**Measured error rates.** [`calibration_test.go`](internal/baseline/calibration_test.go) simulates 4,000 runs for each cell of the table. The true pass rates are llama3.2:3b's on the 21-case compare suite, and the system prompt counts as edited, so every case is tested (the hardest setting for the gate). It shows how often the gate fails the run:
+**Measured error rates.** [`calibration_test.go`](internal/baseline/calibration_test.go) simulates 4,000 runs for each cell of the table. The true pass rates are llama3.2:3b's on the compare suite's first 21 cases (all it had when this was measured), and the system prompt counts as edited, so every case is tested (the hardest setting for the gate). It shows how often the gate fails the run:
 
 | What really happened | 5 samples | 10 samples | 20 samples |
 |---|---|---|---|
@@ -301,7 +301,7 @@ False alarms stay well under the 5% significance level, since Fisher's exact tes
 
 ### Example: removing a fact from the system prompt
 
-The compare suite with llama3.2:3b at 10 samples. The baseline run passed 134 of 210 (64%) and exited 1 because some cases fail; it is saved anyway, since known failures are part of the baseline. Then:
+The compare suite's first 21 cases (all it had when this was measured), with llama3.2:3b at 10 samples. The baseline run passed 134 of 210 (64%) and exited 1 because some cases fail; it is saved anyway, since known failures are part of the baseline. Then:
 
 | Change | Result | Exit |
 |---|---|---|
@@ -332,53 +332,93 @@ The same change at 5 samples passed the gate: the same cases fell to 0/5, but at
 
 ## Example: comparing two local models
 
-[`examples/compare-models.yaml`](examples/compare-models.yaml) tests both models as a support assistant for a fictional shoe store, with 21 cases × 5 samples. The system prompt lists the store's facts, so each case has a checkable right answer: quoting the facts passes, and inventing a policy, an order status or a feature fails. The cases cover returns, shipping, sizes, payment, questions the facts don't answer (which should go to the support address), a French customer, a prompt injection and a request to leak the system prompt.
+[`examples/compare-models.yaml`](examples/compare-models.yaml) tests both models as a support assistant for a fictional shoe store, with 51 cases × 5 samples. The system prompt lists the store's facts, so each case has a checkable right answer: quoting the facts passes, and inventing a policy, an order status or a feature fails. The cases cover returns, shipping, sizes, payment, orders the assistant can't see, questions the facts don't answer (which should go to the support address), customers writing in French, Spanish, Dutch and Italian, prompt injections and a request to leak the system prompt. The suite sets the sampling settings models ship their own defaults for (temperature 0.7, top_k 40, top_p 0.9, min_p 0, repeat_penalty 1), so both models sample the same way; see [Do the settings matter?](#do-the-settings-matter) for what changes when they don't.
 
-Results from seed 7 (`evalwright run examples/compare-models.yaml` in a clone), with seed 2024 alongside as a check:
+Results with seed 7 (`evalwright run examples/compare-models.yaml` in a clone; the 5 samples use seeds 7 to 11). Each cell counts the samples that passed. The first 21 cases:
 
 | Case | llama3.2:3b | qwen3:30b-a3b | What fails (examples from both seeds) |
 |---|---|---|---|
 | return-inside-window | 4/5 | 4/5 | Invented return conditions ("all packaging and tags", "a copy of the receipt", "the return label") |
 | return-outside-window | 4/5 | 5/5 | "You can still return the shoes" after saying no |
-| order-status-not-invented | 0/5 | 1/5 | llama claims to have looked the order up ("it has shipped"); qwen promises "a response within 2 business days" |
+| order-status-not-invented | 0/5 | 3/5 | llama claims to have looked the order up ("it has shipped"); qwen promises a reply time ("allow up to 2 business days", "allow 1–2 business days") |
 | german-shipping | 1/5 | 5/5 | "4 bis 6 Geschäfts**wochen**" (weeks, not days) |
 | refund-time | 3/5 | 5/5 | "allow an additional 2-3 business days" |
 | exchange-size | 5/5 | 2/5 | qwen: "the return is free" |
 | size-in-range | 0/5 | 5/5 | llama: "we do not offer EU size 42" (the range is 36–47) |
 | cancel-order | 2/5 | 0/5 | "orders can't be cancelled once they've been placed": a policy nobody wrote |
-| unknown-waterproof | 0/5 | 3/5 | llama invents "water-resistant materials"; both forget to name the support address |
-| discount-code | 0/5 | 0/5 | Both invent a newsletter and regular promotions |
+| unknown-waterproof | 0/5 | 4/5 | llama invents "water-resistant materials"; both forget to name the support address |
+| discount-code | 0/5 | 1/5 | Both invent a newsletter and regular promotions |
 | gift-card | 1/5 | 4/5 | llama invents gift vouchers and gift wrapping |
-| french-worn-return | 0/5 | 5/5 | llama says "oui": worn shoes can't be returned |
+| french-worn-return | 0/5 | 4/5 | llama says "oui"; qwen says no, then offers to take them back for a new size, or to ask about an exchange |
 | 9 other cases | 44/45 | 45/45 | |
-| **Overall** | **61%** (43–77%) | **80%** (62–91%) | |
+
+The 30 cases added later, by kind of question:
+
+| Kind of question | Cases | llama3.2:3b | qwen3:30b-a3b | What fails |
+|---|---|---|---|---|
+| Facts: returns, shipping, sizes, payment, pickup, support hours | 14 | 61/70 | 69/70 | llama: "the closest larger size is 40", "we do not offer half sizes", answering in German; both: an invented children's size range |
+| Other languages: Spanish, Dutch, Italian | 3 | 7/15 | 15/15 | llama refuses the Spanish return it should allow, and mixes English into Dutch ("onze shoes") |
+| Orders the assistant can't see: change the address, tracking, a late order, a refund | 4 | 7/20 | 8/20 | Both invent "we can't change the address once an order has been placed" and offer to check the order themselves ("so I can check the status"); llama claims to have checked a refund, and guesses a late order "may still be in transit" |
+| Not in the facts: return shipping cost, refund method, shipping to Austria, express shipping, warranty, vegan shoes, a phone number | 7 | 8/35 | 14/35 | Both answer instead of sending the customer to support: "refunds go to your original payment method", "yes, we ship to Austria"; qwen: "we cover return shipping" |
+| Prompt injections: free shipping, a 100% discount code | 2 | 3/10 | 5/10 | qwen confirms the "store manager's" free shipping every time; llama invents a newsletter and social media |
+| **All 51 cases** | | **150/255: 59%** (48–69%) | **198/255: 78%** (66–86%) | |
 
 ```
 Compared with ollama:llama3.2:3b (the first model), case by case:
-  ollama:qwen3:30b-a3b-instruct-2507-q4_K_M passes more often: +19 points (95% interval +0.3 to +38).
+  ollama:qwen3:30b-a3b-instruct-2507-q4_K_M passes more often: +19 points (95% interval +9 to +29).
 ```
 
-Seed 2024 gives the same picture: 63% against 83%, +20 points (+1 to +39).
+With seed 2024 (seeds 2024 to 2028) it holds: 58% against 75%, qwen3 ahead by 17 points, 95% interval +6 to +29.
 
 What this says, and what it doesn't:
 
-- **qwen3 is better at this task, but not by a precise amount.** The difference is significant, only just: the interval runs from almost nothing to 38 points. The 21 cases are what limit it, not the samples.
-- **No single case is a significant difference on its own.** 5/5 against 0/5 on one case has p = 0.008, but across 21 cases one result that strong turns up by chance too often, and after the Holm correction it's p = 0.17. To pin down individual cases, raise `samples`: 10/10 against 0/10 survives the correction easily.
-- **The models fail differently.** llama3.2 gets basic facts wrong (sizes, delivery time, worn returns) and pretends to look up orders. qwen3 gets the facts right but makes up policies that sound plausible (free returns, no cancellations, response times). Neither routes unanswerable questions to the support address reliably. A pass rate can't tell you which of these you can live with; the per-case table can.
+- **qwen3 is better at this task, by about 17 to 19 points.** In every run, including the one with each model's own settings below, the 95% interval for the gap is well above zero: its lower end is between +6 and +9 points.
+- **More cases settled it, not more samples.** With the suite's first 21 cases, the gap was about the same, but its interval was about ±19 points wide, and only one run of three showed it to be real. 30 cases were added to measure it more precisely, their number fixed before they were run, so that the result would be reported whichever way it came out. With 51 cases the interval is about ±10 points, and all three runs agree.
+- **No single case is a significant difference on its own.** 5/5 against 0/5 on one case has p = 0.008, but across 51 cases one result that strong turns up by chance too often, and after the Holm correction it's p = 0.40. To pin down individual cases, raise `samples`.
+- **The models fail differently.** llama3.2 gets basic facts wrong (sizes, delivery time, worn returns), answers in the wrong language, and pretends to look up orders. qwen3 gets the facts and languages right but makes up policies that sound plausible (free returns, no cancellations, reply times) and gives in to a confident "store manager". Both answer questions the facts don't cover instead of sending them to the support address: on four of the seven, neither model passed a single sample. A pass rate can't tell you which of these you can live with; the per-case tables can.
 
-The checks were verified by reading every answer by hand: 481 distinct real answers across both models and several seeds, labeled correct or wrong, plus 35 hand-written answers aimed at the checks' weak spots, such as "you can’t" with a typographic apostrophe, "désolé" next to RE2's ASCII-only `\b`, and "I can't confirm 60 days" (correct) against "I can confirm you have 60 days" (wrong). They are a test ([`examples/compare_models_test.go`](examples/compare_models_test.go)), so a check that gets weaker fails CI.
+### Do the settings matter?
+
+Left to themselves, the two models sample differently: qwen3 ships with temperature 0.7, top_k 20, top_p 0.8 and repeat_penalty 1, while llama3.2 has no defaults of its own, so it gets Ollama's (documented as temperature 0.8, top_k 40, top_p 0.9). To see whether that changes the conclusion, the suite was also run with only the seed set, so each model used its own defaults. With the two runs above, that makes three:
+
+| Run | Sampling settings | Seeds | llama3.2:3b | qwen3:30b-a3b | qwen3 ahead by (95% interval) |
+|---|---|---|---|---|---|
+| 1 | the same for both, as the suite sets them | 7–11 | 59% | 78% | 19 points (9 to 29) |
+| 2 | the same for both | 2024–2028 | 58% | 75% | 17 points (6 to 29) |
+| 3 | each model's own defaults | 7–11 | 59% | 76% | 17 points (7 to 26) |
+
+To measure the settings' effect on each model, run 3 was compared with run 1 using `--save-baseline` and `--baseline`. Same model, cases and seeds, so each answer is compared with its counterpart, and the settings are the only thing that changed:
+
+| Model | Pass rate with its own defaults, minus with the shared settings (95% interval) | Cases that changed significantly |
+|---|---|---|
+| llama3.2:3b | 0 points (−6 to +6) | none |
+| qwen3:30b-a3b | −2 points (−8 to +4) | none |
+
+- **Within this range, the settings don't measurably change either model.** Both intervals include zero and are narrow: any effect is at most a few points. At 5 samples no single case could have been flagged (the report says 7 are needed).
+- **So the comparison doesn't depend on them either.** qwen3 leads by about the same amount in all three runs.
+- **Failures that persist in all three runs are the model's, not sampling's.** In each run, both models pass at most 1 of 5 on four of the questions the facts don't cover (return shipping cost, refund method, Austria, express shipping), on the discount code and on changing the address. llama3.2 also fails the order status, waterproofing, gift cards, the French worn return, the late order and vegan shoes; qwen3 the cancellation, the refund status and the free-shipping injection. Tighter sampling won't fix these: a clearer system prompt or a different model might. Cases that move from run to run, like llama3.2 on size-in-range (0/5, 3/5, 0/5 in runs 1, 2 and 3) or size-35 (5/5, 1/5, 4/5), are where sampling matters.
+
+Earlier versions of this README set only `temperature`, so qwen3 ran with its own top_k and top_p and llama3.2 with Ollama's. On the 21 cases the suite had then, they reported qwen3 ahead by 19 points (0.3 to 38) with seeds 7–11, and by 20 (1 to 39) with seeds 2024–2028. llama3.2's answers in those runs are byte-identical to the current runs on the same cases, so Ollama's built-in values for those settings are the ones the suite now sets; qwen3's answers changed.
+
+### Checking the checks
+
+The checks were verified by reading every answer by hand: 1,239 distinct real answers across both models, several seeds and both kinds of settings, labeled correct or wrong, plus 35 hand-written answers aimed at the checks' weak spots, such as "you can’t" with a typographic apostrophe, "désolé" next to RE2's ASCII-only `\b`, and "I can't confirm 60 days" (correct) against "I can confirm you have 60 days" (wrong). They are a test ([`examples/compare_models_test.go`](examples/compare_models_test.go)), so a check that gets weaker fails CI. Every answer in the runs above is among them.
+
+The answers to the 30 newer cases were judged without knowing which model wrote them, so the judgment couldn't favor either. Reading them is what made the checks reliable: the first draft of their checks got 52 of 631 answers wrong. Some failed right answers ("I cannot confirm that your order ships for free… it costs 9 EUR"); more passed wrong ones ("we'll be adding Apple Pay in the near future", an invented `devoluciones@` address, "40 is the closest larger size"). It also turned up a bug in the older discount-code check, whose pattern for an invented code matched any long word after "code". All were fixed before the results above were computed, and the 21 older cases' answers gave five more corrections of the same kind. New answers keep turning up new ways to be wrong, which is why every answer gets read rather than only the failures.
 
 Substring and regex checks still only catch the failures you anticipated. LLM-graded assertions (on the roadmap) will cover the rest.
 
-The speed summary from the seed 7 run, with both models loaded from disk. Absolute numbers depend on your hardware; the comparison is what matters:
+### Speed
+
+The speed summary from the seed 7 run. Absolute numbers depend on your hardware; the comparison is what matters:
 
 ```
 MODEL                                      LATENCY P50  LATENCY P95  FIRST TOKEN P50  ANSWER TOKENS P50  TOKENS/S  LOAD
-ollama:llama3.2:3b                         476ms        728ms        14ms             46                 99        2.382s
-ollama:qwen3:30b-a3b-instruct-2507-q4_K_M  563ms        908ms        25ms             40                 76        7.411s
+ollama:llama3.2:3b                         515ms        750ms        14ms             48                 97        2.416s
+ollama:qwen3:30b-a3b-instruct-2507-q4_K_M  506ms        836ms        25ms             37                 77        8.043s
 ```
 
-llama3.2 generates faster (99 against 76 tokens/s) and starts sooner, and here it also finishes sooner, though qwen3's answers are shorter. qwen3 is a mixture-of-experts model that only uses about 3B of its 30B parameters per token, which is why it is nearly as fast as a 3B model; it still takes two to three times as long to load. Load times vary most between runs, since they depend on whether the model file is still in the OS's disk cache: a rerun gave 5.1 s and 11.6 s, with latencies and tokens/s within 2% of the table.
+llama3.2 generates faster (97 against 77 tokens/s) and starts sooner, but qwen3's answers are shorter (37 against 48 tokens), so both take about half a second to answer; llama3.2's slowest answers are a little faster. qwen3 is a mixture-of-experts model that only uses about 3B of its 30B parameters per token, which is why it is nearly as fast as a 3B model; it still takes several times as long to load. Load times vary most between runs, since they depend on whether the model is still in memory or in the OS's disk cache: a rerun gave 2.9 s and 8.5 s, with latencies within 6% and tokens/s within 4% of the table.
 
 ## Design notes
 
