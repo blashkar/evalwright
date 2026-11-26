@@ -2,7 +2,7 @@
 
 # Build on the host's architecture and cross-compile, so a multi-platform
 # build doesn't run the Go compiler under emulation.
-FROM --platform=$BUILDPLATFORM golang:1.27.3-alpine3.24 AS build
+FROM --platform=$BUILDPLATFORM golang:1.27.4-alpine3.24 AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
